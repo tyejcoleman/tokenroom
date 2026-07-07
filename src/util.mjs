@@ -217,12 +217,23 @@ export function activeAccountKeys(windowSec = 10 * 60, nowSec = Date.now() / 100
 }
 
 export function readConfig() {
-  return {
+  const cfg = {
     stamp_enabled: true,
     ceiling_pct: 80,
     mode: 'ondemand',
     compact_guard_min: null, // minutes-to-reset under which AUTO compaction is blocked (ADR-13); null = off
     launch_gate: false, // deny expensive Task/Agent/Workflow launches when the window verdict is defer (T2.14); default OFF
+    // Quiet-until-it-matters (ADR-26): the 5h-quota %-left at/below which routine budget
+    // surfacing turns ON. ABOVE it the model gets NOTHING for the recurring quota lines
+    // (per-turn stamp, cost receipts, shared-session note) — it stays unburdened. AT/BELOW
+    // it they surface and escalate. Default 25.
+    critical_pct: 25,
     ...(readJSON(join(tokenroomDir(), 'config.json')) ?? {}),
   };
+  // Defensive (never-throw discipline, ADR-5): a hand-edited critical_pct that isn't a real
+  // 0–100 number (NaN, string, bool, null, out of range) falls back to the default rather
+  // than silencing the genuinely-critical case or spamming a healthy window.
+  const cp = cfg.critical_pct;
+  cfg.critical_pct = typeof cp === 'number' && Number.isFinite(cp) && cp >= 0 && cp <= 100 ? cp : 25;
+  return cfg;
 }

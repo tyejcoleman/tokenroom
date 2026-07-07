@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **Quiet until it matters (ADR-26).** The routine per-turn quota stamp
+  (`quota — 5h: X% left …`), the PostToolUse cost receipt, and the shared-session note are
+  now **silent while the 5h window is healthy** and surface only when it is genuinely
+  actionable — at/below the new `critical_pct` config (default **25**), or when the burn
+  model projects running dry *before* the reset. Above threshold the model is no longer made
+  "always conscious" of a budget that needs no attention, cutting per-turn/per-tool token
+  waste. Non-budget output (wall clock, context, deferred work, pins, intent, checkpoints)
+  and the one-shot disclosures (window reset, account switch, pre-switch echo) are unchanged;
+  the PostToolUse band re-stamp keeps its governor gate (default `ondemand`'s first band = 25
+  = the default `critical_pct`, so out-of-the-box behavior aligns). A bad `critical_pct`
+  falls back to the default (defensive, never-throw). Local hook edit → live immediately;
+  `npm publish` still needed to update other installs. Proven both directions in the field
+  (silent at 65% left; surfaces at 15%). New `test/critical.test.mjs` (7 tests); full suite
+  green (103 tests).
+
 ## 0.6.0 — 2026-07-02
 
 The first stable release under the new name (0.6.0-rc.1 claimed `tokenroom` on npm

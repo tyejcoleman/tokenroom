@@ -349,3 +349,103 @@ WORDING (switch banner, echo honesty, pair advice) has not yet run the ADR-9 wor
 eval — it is batched with the other pending items into the harden round and gates the
 npm release. *(Ran 2026-07-02, S-W/S-E/S-K: PASSED on both tiers with clean naive-harm
 baselines; `eval/v3-wording/results/2026-07-02-batched-post-0.3-wording.md`.)*
+
+## ADR-25 — Work-intent + in-session auto-resume (amends ADR-6/ADR-19, extends ADR-22)
+Field complaint (2026-07-05): on long autonomous runs tokenroom "keeps stopping" — it
+throttles at 5% and defers, and after a reset nothing brings the work back, so a human
+must restart every window. The cause is structural: descent is a pure function of the 5h
+`%`-left with NO way for the agent to say "this is a long convergence run — burn to the
+floor," and `plan_resume` was passive (a one-line summary + a readiness flag; nothing
+continues the work). Three coupled decisions fix it, behind ONE opt-in signal:
+
+(a) **Work-intent is the FIFTH MCP write surface** (amends ADR-6, which enumerated four:
+plan_resume, pin_fact, checkpoint, handoff/continuity). `set_intent` (and `tokenroom
+intent`) writes `~/.tokenroom/intent.json`: `kind` ∈ {convergence, long_running,
+priority} = a FOCUSED run, or `default` = normal. It carries an optional task `queue` and
+is session-tagged with the same MCP-has-no-session-id caveat and match-or-untagged guard
+as checkpoint (ADR-15); 12h TTL measured from the run's start; latest-wins. Absent /
+expired / foreign-session → null → every surface behaves exactly as before, so the
+default-path eval results still hold.
+
+(b) **A focused intent flips descent** (amends ADR-19). ADR-19's ladder is unchanged for
+one-off work: full speed to 5%, mindful 1–5%, finishing-moves ≤1%. Inside a focused run
+the 1–5% band stops saying "prefer small steps / defer a huge new task" and instead says
+"keep FULL SPEED to the 1% floor, do not defer here" — the agent burns the window down
+because it declared the run worth it. The stranding guard doesn't vanish, it moves to the
+floor: at ≤1% the message becomes "arm in-session resume" (below). The launch gate also
+activates under a focused intent even when `launch_gate` config is off, and WARN-AND-ARMS:
+it records an armed resume plan for the deferred launch (never clobbering a plan the agent
+already wrote) and injects a resource-aware heads-up, but it does NOT stop the agent —
+field directive 2026-07-05, "warn during a declared run, never make Claude stop; keep going
+but be resource-aware." Only the explicit `launch_gate` opt-in hard-denies. That is the "if
+I start something big, warn me and set up the resume — but don't stop me" behavior. This is NEW agent-facing WORDING → it joins the ADR-9 eval
+queue and gates the release; the default (non-focused) wording is byte-identical to the
+shipped, already-eval'd text, so only the focused branch is under test.
+
+(c) **Armed resume continues IN-SESSION** — this is where ADR-22 draws its line, so read
+it carefully. ADR-22 removed the HEADLESS executor (`claude -p`) because a headless run no
+longer draws from the expiring interactive pool, so it spent NEW metered money unattended
+— "a scheduler whose economics inverted." It explicitly reassigned autonomous continuation
+to "official IN-SESSION surfaces — Stop-hook continuation, scheduled wakeups past resets."
+This ADR builds exactly that, and ONLY that. `plan_resume` gains a `queue`, a `blocked_on`
+∈ {five_hour, seven_day} (so weekly-blocked work becomes ready at the 7d reset, not the 5h
+one — the user asked for both windows), and an `armed` flag. A new **Stop hook**
+(`hookStop`) is the enforcer: when a focused run has an armed plan AND the blocked window
+has actually reset, the agent yielding control is blocked and the next queued task is
+re-injected, so THE SAME interactive session continues — the quota it spends is the
+interactive quota the work was deferred from, never a new metered headless pool. It is
+strictly opt-in and fail-open: no focused intent / not armed / not yet ready / already
+re-fired this turn (`stop_hook_active`) / this session's window still shows dry → allow the
+stop, always. It is the only hook that can PREVENT a stop, so every uncertainty allows, and
+the exit is explicit (`tokenroom resume --clear`). The multi-hour idle gap (sleep until the
+reset, then wake) is bridged by the harness's own in-session `ScheduleWakeup`, which the
+agent invokes at the floor — tokenroom arms and enforces continuation; it does not itself
+schedule the OS-level wake, and it still writes NOTHING headless. ADR-16's withdrawn
+headless-rule amendment stays withdrawn; the plain rule "never burn interactive
+subscription quota headlessly" is untouched because nothing here runs headless.
+
+*Why:* unspent-then-unresumed quota on a long build is the same waste ADR-19 exists to
+prevent, one level up — the window resets and the work just sits there. Making the agent
+declare intent keeps the aggression OPT-IN (a one-off task is never surprised into burning
+to 1% or into a session that won't stop), and confining continuation to the Stop hook keeps
+it inside ADR-22's in-session boundary. **Enforced by:** `src/intent.mjs`
+(set/active/isFocused/clear + queue caps); `armed`/`queue`/`blocked_on`/`resumeReady` +
+weekly-safe expiry in `src/resume.mjs`; the focused descent branch, warn-and-arm launch
+gate, and `hookStop` in `src/hook.mjs`; the `set_intent` tool + `plan_resume` schema in
+`src/mcp.mjs`; Stop-hook registration in `src/install.mjs`; the unit + hook-integration
+matrix in `test/intent.test.mjs` (13 tests). The focused-branch WORDING is NOT yet
+ADR-9-eval'd — it batches into the harden round with the other pending items and gates the
+next npm release.
+
+## ADR-26 — Quiet until it matters: the routine quota stamp is silent above `critical_pct` (amends ADR-19/T2.13)
+
+The recurring budget surfacing — the every-turn UserPromptSubmit quota stamp
+(`quota — 5h: X% left …`), the PostToolUse cost receipt (`receipt: that Bash cost ≈… — Y%
+left`), and the shared-session note — fired on essentially every turn/tool regardless of
+level. That made the model *always conscious* of a budget that, while healthy, needs no
+attention: attention it doesn't need is context it shouldn't be paying for. **Decision:** a
+new `critical_pct` config (default **25**) gates the routine quota lines. When the 5h window
+is **above** `critical_pct` the model gets **NOTHING** for them (silent); **at/below** it —
+or whenever the burn model deterministically projects running dry **before the reset** (the
+genuinely-actionable case, preserved above threshold) — they surface and escalate exactly as
+before via the existing descent ladder (ADR-19). This mirrors the weekly window's own
+`<20%`-left gate (already shipped): a healthy window is noise that invites premature
+throttling, so we don't even tell the model.
+
+Scope is deliberately narrow — *only* the routine `% left` noise is suppressed. Untouched:
+the wall clock, the context line (a different resource, deliberately burn-through), deferred-
+work readiness, the microcompaction drop note, pinned facts / checkpoints / session intent,
+and the rare one-shot disclosures (window-reset "fresh", account-switch banner, pre-switch
+echo). The PostToolUse **band** re-stamp keeps its governor gate (`fh_bands`): the default
+`ondemand` profile's first band is 25 — equal to the default `critical_pct` — so out of the
+box they align, and a power user who opts into `powersave` still gets its early bands. A bad
+`critical_pct` (non-number, NaN, out of 0–100) falls back to 25 (defensive, never-throw).
+
+*Why a threshold and not a mode:* modes shift *when* tokenroom speaks about a worsening
+crossing; `critical_pct` answers the prior question "is this budget worth the model's
+attention *at all* right now?" — and for a healthy window the answer is no. **Enforced by:**
+`critical_pct` default + sanitization in `readConfig` (`src/util.mjs`); the `quotaActionable`
+gate on the normal quota line, pair advice, and shared-session note in `hookUserPromptSubmit`
+and on the receipt in `hookPostToolUse` (`src/hook.mjs`); the above/below/override/defensive
+matrix in `test/critical.test.mjs` (7 tests). WORDING is unchanged from the ADR-9-eval'd
+lines — this ADR only changes *whether* they fire, not what they say.

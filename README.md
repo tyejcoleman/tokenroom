@@ -232,6 +232,12 @@ its reset with nothing wasted and nothing dark. Cruise, don't crash — at both 
   against the window's %-steps, *learning* your account's tokens-per-percent. That's how
   the HUD earns `≈tokens left`, exhaustion becomes a confidence band, and the warning
   disappears entirely while you're idle.
+- **Quiet until it matters:** `critical_pct` (default **25**) is the 5h-quota %-left at/below
+  which the routine budget lines — the per-turn `quota — 5h: X% left` stamp, cost receipts,
+  and the shared-session note — turn on. *Above* it the model gets nothing for them and stays
+  unburdened; at/below it they surface and escalate (and a window projected to run dry *before*
+  its reset always surfaces, healthy % or not). Non-budget output (clock, context, deferred
+  work, pins, intent) is never gated. A bad value falls back to the default (ADR-26).
 - **Governor modes:** `mode: performance | ondemand | powersave` shifts *when* tokenroom
   speaks (bands, receipt floors, throttle) — never what it says. Applies without restart.
 - **Opt-in guards:** `compact_guard_min` blocks *auto*-compaction minutes before a reset

@@ -356,6 +356,10 @@ test('T2.12: checkpoint lifecycle — save via MCP, re-inject after compact, sta
 test('T2.13: receipt fires when one tool call visibly moves the budget; floors keep quiet otherwise', () => {
   const dir = mkdtempSync(join(tmpdir(), 'hr-rcpt-'));
   const env = { TOKENROOM_DIR: dir };
+  // a receipt is routine quota surfacing (ADR-26): silent above critical_pct. This test
+  // asserts the receipt ECONOMICS wording, so hold the gate open (the suppression itself is
+  // covered in critical.test.mjs).
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ critical_pct: 100 }));
   const now = () => Math.round(Date.now() / 1000);
   const write = (usedPct, cost) =>
     writeFileSync(
@@ -479,6 +483,8 @@ test('doctor: flags missing wiring in a sandbox, exits 1; clean after install', 
 test('stamp: quota tokens are labeled "of quota" — never a bare token pool next to a reset clock', () => {
   const dir = mkdtempSync(join(tmpdir(), 'hr-conf-'));
   const env = { TOKENROOM_DIR: dir };
+  // asserts the "of quota" token labeling at a healthy 84% — hold the ADR-26 quiet gate open
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ critical_pct: 100 }));
   const now = Math.round(Date.now() / 1000);
   writeFileSync(
     join(dir, 'state.json'),
@@ -513,6 +519,8 @@ test('release preflight: offline checks run and validate this repo coherently', 
 test('stamp discloses concurrent sessions sharing the account window', () => {
   const dir = mkdtempSync(join(tmpdir(), 'hr-multi-'));
   const env = { TOKENROOM_DIR: dir };
+  // asserts the shared-session disclosure at a healthy 50% — hold the ADR-26 quiet gate open
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ critical_pct: 100 }));
   const now = Math.round(Date.now() / 1000);
   writeFileSync(
     join(dir, 'state.json'),

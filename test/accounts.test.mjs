@@ -35,6 +35,9 @@ const stamp = (sid, env) => {
 test('field capture 2026-07-01: /login switch remaps in the SAME tap invocation; one-shot switch banner shows the NEW numbers', () => {
   const dir = mkdtempSync(join(tmpdir(), 'tr-switch-'));
   const env = { TOKENROOM_DIR: dir };
+  // this test exercises quota RENDERING + switch/attribution, not the ADR-26 quiet gate —
+  // hold that gate open (critical_pct 100 = always surface) so the render assertions stand
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ critical_pct: 100 }));
   const A = winA(); // the dry pre-switch account (0% left)
   const B = winB(); // the fresh post-switch account (98% left)
 
@@ -70,6 +73,8 @@ test('field capture 2026-07-01: /login switch remaps in the SAME tap invocation;
 test('echo honesty: a frozen dry figure with a values-fresher sibling is disclosed as a possible pre-switch echo, then recovers on the real switch', () => {
   const dir = mkdtempSync(join(tmpdir(), 'tr-echo-'));
   const env = { TOKENROOM_DIR: dir };
+  // exercises echo/switch RENDERING, not the ADR-26 quiet gate — hold the gate open
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ critical_pct: 100 }));
   const A = winA();
   const B = winB();
   const keyA = toKey(A);

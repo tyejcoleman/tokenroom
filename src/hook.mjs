@@ -2,13 +2,14 @@ import { join } from 'node:path';
 import { readState } from './state.mjs';
 import { readConfig, modeProfile, fmtClock, fmtTokens, fmtDelta, readJSON, atomicWriteJSON, ensureDir, crossedReset, quotaScope } from './util.mjs';
 import { captureHandoff, takeHandoff, renderHandoff } from './handoff.mjs';
-import { readResume } from './resume.mjs';
+import { readResume, resumeReady, planResume } from './resume.mjs';
 import { logEvent, recentEvents } from './events.mjs';
 import { listPins, renderPins } from './pins.mjs';
 import { takeCheckpoint, renderCheckpoint } from './checkpoint.mjs';
 import { takeContinuity, renderContinuityInjection } from './continuity.mjs';
 import { sampleFlow, sessionFlowStats } from './flow.mjs';
 import { pairAdvice, staleEcho, profileForKey } from './accounts.mjs';
+import { activeIntent, isFocused } from './intent.mjs';
 
 const STALE_SEC = 30 * 60;
 
@@ -93,6 +94,12 @@ export async function hookPostToolUse() {
     const now = Date.now() / 1000;
     if (!s || now - s.updated_at > 5 * 60) return;
     const mySession = p.session_id ?? 'unknown';
+    // Work-intent (ADR-25): a focused run (convergence/long-running/priority) flips descent
+    // from cautious early-defer to spend-to-the-floor, and its 1% floor arms the queue for
+    // in-session resume instead of a plain stop. Absent/expired/foreign-session → null → today's
+    // behavior unchanged, so the default-path eval results still hold.
+    const intent = activeIntent(p.session_id, now);
+    const focused = isFocused(intent);
 
     if (crossedReset(s, now)) return; // window data predates a passed reset — wrong-signed, not stale
     const fhLeft = s.windows?.five_hour?.used_pct != null ? 100 - s.windows.five_hour.used_pct : null;
@@ -103,6 +110,12 @@ export async function hookPostToolUse() {
     const ctxLeft = ctx?.used_pct != null ? Math.max(0, (ctx.compact_ceiling_pct ?? 80) - ctx.used_pct) : null;
     const ctxBand = ctxLeft != null ? bandOf(ctxLeft, prof.ctx_bands) : 0;
     const exh = !!(s.burn?.projected_exhaustion && s.windows?.five_hour?.resets_at && s.burn.projected_exhaustion < s.windows.five_hour.resets_at);
+    // Quiet-until-it-matters (ADR-26): a cost receipt is routine quota "% left" surfacing, so
+    // it stays silent while the 5h window is healthy. It fires only when the window is genuinely
+    // actionable — at/below critical_pct, OR projected to run dry before the reset (`exh`). The
+    // band-crossing re-stamp below is already governed by the mode profile's fh_bands (default
+    // ondemand's first band = 25 = the default critical_pct), so it is left to the governor.
+    const quotaActionable = fhLeft != null && (fhLeft <= cfg.critical_pct || exh);
 
     const bandsPath = join(dir, 'bands.json');
     const all = readJSON(bandsPath) ?? {};
@@ -129,7 +142,7 @@ export async function hookPostToolUse() {
     const sameWindow = !(windowStart && (prev.t ?? 0) < windowStart);
     const du = sameWindow && fhUsed != null && prev.u != null ? fhUsed - prev.u : null;
     const dc = sameWindow && cost != null && prev.c != null ? cost - prev.c : null;
-    if ((du != null && du >= prof.receipt_pct_floor) || (dc != null && dc >= prof.receipt_cost_floor)) {
+    if (quotaActionable && ((du != null && du >= prof.receipt_pct_floor) || (dc != null && dc >= prof.receipt_cost_floor))) {
       let r = `receipt: that ${p.tool_name ?? 'operation'} cost ≈`;
       r += du != null && du >= prof.receipt_pct_floor ? `${Math.round(du)}% of the 5h window` : `$${dc.toFixed(2)}`;
       if (du != null && du >= prof.receipt_pct_floor && dc != null && dc >= 0.01) r += ` (+$${dc.toFixed(2)})`;
@@ -205,6 +218,7 @@ export async function hookPostToolUse() {
       // descent applies to the PAIR — low active quota means land-and-switch, not throttle;
       // defer (plan_resume) only when BOTH profiles are thin.
       const pa = fhLeft <= 15 ? pairAdvice(myKey, fhLeft, now) : null;
+      const kindLabel = focused ? (intent.kind === 'long_running' ? 'long-running' : intent.kind) : null;
       const advice =
         minsToReset != null && minsToReset > 0 && minsToReset <= 10
           ? `reset in ~${Math.max(1, Math.round(minsToReset))}m — quota refills imminently; do NOT slow down or defer, keep full speed (you refill well before you could run dry)`
@@ -215,9 +229,13 @@ export async function hookPostToolUse() {
                 ? `at the 1% floor — land and switch: commit in-flight work, checkpoint, then switch to profile '${pa.other.label}' (${pa.pct}) via /login or \`tokenroom switch\` — zero downtime, no defer needed`
                 : `${fhLeft <= 5 ? 'quota is low' : 'quota getting low'}, but ${pa.text}`
               : fhLeft <= 1
-                ? 'at the 1% floor — finishing moves only: commit in-flight work, checkpoint, plan_resume the rest, start nothing new'
+                ? focused
+                  ? `at the 1% floor — arm in-session resume: commit in-flight work, checkpoint, then plan_resume the REMAINING QUEUE with arm:true — tokenroom continues it in THIS session once the window resets${resetsAt ? ` (schedule a wakeup ~${fmtClock(resetsAt)} if you'll be idle until then)` : ''}; start no new INDIVISIBLE work, but nothing else stops`
+                  : 'at the 1% floor — finishing moves only: commit in-flight work, checkpoint, plan_resume the rest, start nothing new'
                 : fhLeft <= 5
-                  ? 'be mindful of velocity — keep working, but prefer small divisible steps and checkpoint often so nothing is stranded at the reset; defer a genuinely huge or indivisible new task (plan_resume)'
+                  ? focused
+                    ? `${kindLabel} run — keep FULL SPEED to the 1% floor, do NOT defer or throttle here: just keep each step divisible and your handoff/queue current so nothing strands, and land-and-arm only AT the floor`
+                    : 'be mindful of velocity — keep working, but prefer small divisible steps and checkpoint often so nothing is stranded at the reset; defer a genuinely huge or indivisible new task (plan_resume)'
                   : 'plenty remains — keep working at full speed; just check that big new tasks fit before the reset';
       const estTok = s.burn?.est_tokens_left != null ? ` (≈${fmtTokens(s.burn.est_tokens_left)} tokens of quota)` : '';
       parts.push(`5h window now ${Math.round(fhLeft)}% left${estTok}${s.windows.five_hour.resets_at ? `, resets ${fmtClock(s.windows.five_hour.resets_at)}` : ''} — ${advice}`);
@@ -256,32 +274,67 @@ export async function hookPostToolUse() {
 }
 
 /**
- * Launch gate (T2.14, opt-in): an agent about to overspend won't audit itself —
- * structurally fit_check expensive launches (subagents/workflows) and deny when the
- * window verdict is `defer`. Fail-open everywhere (ADR-13 pattern): missing state,
- * missing config, any error → allow.
+ * Launch gate (T2.14): an agent about to overspend won't audit itself — structurally
+ * fit_check expensive launches (subagents/workflows) and intervene when the window verdict
+ * is `defer` or in late descent (≤5%). Two activation paths: the opt-in `launch_gate`
+ * config, OR an active FOCUSED intent (ADR-25) — declaring a long-running run opts you into
+ * "warn me + auto-arm before a big indivisible launch dies in a thin window". Under a
+ * focused intent the gate WARN-AND-ARMS: it records an armed resume plan so the launch
+ * auto-continues in-session after the reset, rather than a bare block. Fail-open everywhere
+ * (ADR-13 pattern): missing state, missing config, any error → allow.
  */
 const EXPENSIVE_TOOLS = ['Task', 'Agent', 'Workflow'];
 
 export async function hookPreToolUse() {
   const p = await readStdin();
   try {
-    if (!readConfig().launch_gate) return;
     if (!EXPENSIVE_TOOLS.includes(p.tool_name)) return;
+    const now = Date.now() / 1000;
+    const focused = isFocused(activeIntent(p.session_id, now));
+    if (!readConfig().launch_gate && !focused) return;
     // ≥2 accounts and this session unmapped → we can't attribute a window to it; deny using the
     // top-level pointer would gate on ANOTHER account's quota, so fail open (ADR-21 show-gate).
     const { dir, show } = quotaScope(p.session_id);
     if (!show) return;
     const s = readState(dir);
-    if (!s || Date.now() / 1000 - s.updated_at > STALE_SEC) return;
+    if (!s || now - s.updated_at > STALE_SEC) return;
     const { fitCheck } = await import('./fit.mjs');
     const fit = fitCheck(s, { est_tokens: 40000 }); // conservative launch-sized estimate
     const fhLeft = s.windows?.five_hour?.used_pct != null ? 100 - s.windows.five_hour.used_pct : null;
     // deny at defer, and in late descent (≤5% left): an expensive launch is INDIVISIBLE —
     // it cannot be checkpointed mid-flight, so a dying window wastes the whole bet
     if (fit?.window?.verdict !== 'defer' && !(fhLeft != null && fhLeft <= 5)) return;
-    logEvent({ type: 'launch_blocked', session_id: p.session_id ?? null, tool: p.tool_name });
     const resets = s.windows?.five_hour?.resets_at;
+    // Under a focused intent, don't just BLOCK — capture the launch as an ARMED resume plan
+    // so it auto-continues in-session after the reset (warn-and-arm). Never clobber a richer
+    // plan the agent already wrote: only auto-arm when no plan exists.
+    let armed = false;
+    if (focused) {
+      const existing = readResume(now);
+      if (!existing) {
+        try {
+          armed = !!planResume(
+            { summary: `deferred ${p.tool_name} launch`, queue: [`${p.tool_name} launch deferred by the launch gate (thin 5h window) — re-issue it after the reset`], blocked_on: 'five_hour', arm: true, est_tokens: 40000 },
+            s,
+            now
+          )?.armed;
+        } catch {
+          // arming is best-effort; still deny below so the launch doesn't die mid-flight
+        }
+      } else {
+        armed = !!existing.armed;
+      }
+    }
+    // Field directive 2026-07-05: during a declared (focused) run, WARN — never STOP. Tell the
+    // agent it can keep going, resource-aware, with an armed fallback; a launch is a new-engagement
+    // moment, which is the only place we speak up. Only the EXPLICIT launch_gate opt-in hard-denies.
+    if (focused) {
+      logEvent({ type: 'launch_warned', session_id: p.session_id ?? null, tool: p.tool_name, armed });
+      const note = `[tokenroom] resource-aware heads-up (NOT a stop — keep going): the 5h window is nearly empty${resets ? ` (resets ${fmtClock(resets)})` : ''}, so this ${p.tool_name} launch may not finish before the reset.${armed ? ' A resume fallback is ARMED, so nothing is lost if it doesn\'t.' : ''} If the work is divisible/checkpointable, proceed; if it is big and indivisible, prefer a small piece first or schedule a wakeup at the reset. You do not need to stop.`;
+      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: note } }));
+      return;
+    }
+    logEvent({ type: 'launch_blocked', session_id: p.session_id ?? null, tool: p.tool_name, armed });
     process.stdout.write(
       JSON.stringify({
         hookSpecificOutput: {
@@ -293,6 +346,45 @@ export async function hookPreToolUse() {
     );
   } catch {
     // the gate must be impossible to blame for a wedged session — fail open
+  }
+}
+
+/**
+ * Stop hook (ADR-25): in-session auto-resume. When a FOCUSED run has ARMED a resume plan
+ * and the blocked window has reset, the agent yielding control is exactly the moment to
+ * CONTINUE — block the stop and inject the next queued task so THIS interactive session
+ * keeps going (never headless; the ADR-22 boundary holds — this is the same session whose
+ * quota the work was deferred from). Strictly opt-in and fail-open: no focused intent / not
+ * armed / not yet ready / already re-fired this turn (stop_hook_active) → allow the stop,
+ * always. It is the only hook that can PREVENT a stop, so every uncertainty allows.
+ */
+export async function hookStop() {
+  const p = await readStdin();
+  try {
+    if (p.stop_hook_active) return; // we already forced a continue this turn — never loop
+    const now = Date.now() / 1000;
+    if (!isFocused(activeIntent(p.session_id, now))) return; // opt-in: only inside a focused run
+    const plan = readResume(now);
+    if (!plan || !plan.armed || !resumeReady(plan, now)) return; // nothing armed-and-ready to continue
+    // Clock-passed is necessary but not sufficient: if this session's account state still
+    // shows the blocked window dry, continuing would just hit 429s — fail open (allow stop).
+    const { dir, show } = quotaScope(p.session_id);
+    if (show) {
+      const w = readState(dir)?.windows?.[plan.blocked_on];
+      const left = w?.used_pct != null ? 100 - w.used_pct : null;
+      if (left != null && left <= 2 && w?.resets_at && now < w.resets_at) return;
+    }
+    const next = plan.queue?.[0]?.task ?? plan.summary;
+    const rest = Math.max(0, (plan.queue?.length ?? 0) - 1);
+    logEvent({ type: 'resume_continued', session_id: p.session_id ?? null, queued: plan.queue?.length ?? 0, blocked_on: plan.blocked_on });
+    process.stdout.write(
+      JSON.stringify({
+        decision: 'block',
+        reason: `[tokenroom] deferred work is ready — the ${plan.blocked_on === 'seven_day' ? '7d weekly' : '5h'} window has reset, so continue IN THIS SESSION rather than stopping. Next: ${next}${rest ? ` · then ${rest} more queued (\`tokenroom resume\` shows all)` : ''}. When the queue is genuinely finished, run \`tokenroom resume --clear\` and \`tokenroom intent clear\` so this stops firing.`,
+      })
+    );
+  } catch {
+    // the ONE hook that can prevent a stop must never trap a session — fail open (allow the stop)
   }
 }
 
@@ -324,9 +416,11 @@ export async function hookSessionStart() {
     if (pins.length) parts.push(renderPins(pins));
   }
   const plan = readResume();
-  if (plan?.resume_at && Date.now() / 1000 >= plan.resume_at) {
+  if (resumeReady(plan)) {
+    const win = plan.blocked_on === 'seven_day' ? '7d weekly' : '5h';
+    const nq = plan.queue?.length ?? 0;
     parts.push(
-      `[tokenroom] deferred work is now ready (its window has reset): "${String(plan.summary ?? '')}". Surface this to the user, and run \`tokenroom resume --clear\` once it is picked up.`
+      `[tokenroom] deferred work is now ready (the ${win} window has reset): "${String(plan.summary ?? '')}"${nq ? ` — ${nq} queued task${nq > 1 ? 's' : ''}` : ''}.${plan.armed ? ' It is ARMED to continue in-session — pick it up now and keep going.' : ''} Surface this to the user, and run \`tokenroom resume --clear\` once it is picked up.`
     );
   }
   if (!parts.length) return;
@@ -352,7 +446,8 @@ export async function hookUserPromptSubmit() {
   const { dir, show: showQuota, key: myKey } = quotaScope(mySession);
   sampleFlow(payload.transcript_path, mySession, Date.now() / 1000, dir); // velocity engine's FAST signal (T2.1)
 
-  if (process.env.TOKENROOM_DISABLE === '1' || !readConfig().stamp_enabled) {
+  const cfg = readConfig();
+  if (process.env.TOKENROOM_DISABLE === '1' || !cfg.stamp_enabled) {
     logEvent({ type: 'stamp_skipped', session_id: mySession, reason: 'disabled' });
     return;
   }
@@ -378,6 +473,20 @@ export async function hookUserPromptSubmit() {
   const fh = s.windows?.five_hour;
   const sd = s.windows?.seven_day;
   const ctx = foreign ? null : s.context;
+  // Quiet-until-it-matters (ADR-26): the every-turn quota stamp is the loudest budget noise,
+  // so it stays SILENT while the 5h window is healthy. It surfaces only when genuinely
+  // actionable — at/below critical_pct, OR the burn model projects running dry BEFORE the
+  // reset (the two deterministic "it matters now" cases). Above that, the recurring quota
+  // line, its pair-aware advice, and the shared-session note are withheld so the model isn't
+  // burdened. NON-budget output (wall clock, context, deferred work, drop note) and the rare
+  // one-shot disclosures (window reset, account switch, pre-switch echo) are unaffected; the
+  // weekly window keeps its own <20%-left gate.
+  const fhLeft = fh?.used_pct != null ? 100 - fh.used_pct : null;
+  const eBand = s.burn?.exhaustion_band;
+  const eTime = s.burn?.projected_exhaustion;
+  const exhaustsBeforeReset =
+    !!(eBand && fh?.resets_at && eBand[0] < fh.resets_at) || !!(eTime && fh?.resets_at && eTime < fh.resets_at);
+  const quotaActionable = fhLeft != null && (fhLeft <= cfg.critical_pct || exhaustsBeforeReset);
   // Two field-observed conflations (2026-06-10, twice) drove this format: agents read
   // quota tokens/reset clocks as CONTEXT that "comes back at HH:MM". It never does.
   // Explicit "quota —/context —" labels + the contrast clause, probe-validated
@@ -416,7 +525,10 @@ export async function hookUserPromptSubmit() {
       parts.push(
         `quota — 5h: ${Math.round(100 - fh.used_pct)}% left (UNCHANGED for ${echo.frozen_min}m — possibly a pre-switch echo; if you just ran /login, figures refresh on the next completed turn; ${sibName} last seen ${sib.fh_left != null ? `≈${Math.round(sib.fh_left)}% left` : 'with fresher data'})`
       );
-    } else {
+    } else if (quotaActionable) {
+      // The routine per-turn quota line — surfaced ONLY when the window is genuinely
+      // actionable (ADR-26); above critical_pct with no before-reset exhaustion this whole
+      // branch is skipped and the stamp says nothing about quota.
       let seg = `quota — 5h: ${Math.round(100 - fh.used_pct)}% left`;
       if (s.burn?.est_tokens_left != null) seg += ` (≈${fmtTokens(s.burn.est_tokens_left)} tokens of quota)`;
       if (fh.resets_at) seg += `, resets ${fmtClock(fh.resets_at)}`;
@@ -436,9 +548,12 @@ export async function hookUserPromptSubmit() {
     }
     // PAIR-AWARE DESCENT (ADR-24): active window low + the OTHER labeled profile fresh and
     // healthy → the move is power-through-then-switch, never throttle. Both-thin keeps
-    // today's defer wording; healthy active says nothing here (noise discipline).
-    const pa = pairAdvice(myKey, 100 - fh.used_pct);
-    if (pa) parts.push(pa.text);
+    // today's defer wording; healthy active says nothing here (noise discipline). Gated with
+    // the quota line (ADR-26): a healthy window above critical_pct never raises the pair.
+    if (quotaActionable) {
+      const pa = pairAdvice(myKey, 100 - fh.used_pct);
+      if (pa) parts.push(pa.text);
+    }
   }
   // The weekly window is hidden from the LLM until it is actually a binding constraint:
   // surface it (and any HOT-pace coaching) ONLY once <20% remains (user directive
@@ -458,7 +573,9 @@ export async function hookUserPromptSubmit() {
   // the 5h window is ACCOUNT-level: other open sessions burn it too. Sessions whose
   // hooks touched bands.json recently are live burners — disclose them (field 2026-06-10:
   // a 29-point single-call "receipt" was a concurrent session's burn, co-attributed).
-  if (showQuota) try {
+  // This is meta-info ABOUT the quota figure, so it rides the same gate (ADR-26): when the
+  // quota line is withheld above critical_pct, the shared-session note would be contextless.
+  if (showQuota && quotaActionable) try {
     // bands.json is per-account, so this count and the combined burn are SAME-account
     // sessions only (ADR-20 refined by ADR-21) — a sibling on another account no longer
     // inflates "sessions sharing this quota".
@@ -487,8 +604,8 @@ export async function hookUserPromptSubmit() {
     parts.push(`context — ${Math.max(0, Math.round((ctx.compact_ceiling_pct ?? 80) - ctx.used_pct))}% left before compaction${hadWindow ? ' (quota resets do NOT restore context)' : ''}`);
   }
   const plan = readResume();
-  if (plan?.resume_at && Date.now() / 1000 >= plan.resume_at) {
-    parts.push(`deferred work now ready: "${String(plan.summary ?? '').slice(0, 60)}"`);
+  if (resumeReady(plan)) {
+    parts.push(`deferred work now ready: "${String(plan.summary ?? '').slice(0, 60)}"${plan.queue?.length ? ` (${plan.queue.length} queued${plan.armed ? ', armed — auto-continues in-session' : ''})` : ''}`);
   }
 
   // Microcompaction is silent (no hook fires) — if the tap saw an unexplained context

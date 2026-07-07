@@ -36,6 +36,9 @@ test('tap: garbage and empty stdin never crash, still print a line', () => {
 
 test('hook: fresh state → stamp; stale → silent; disabled → silent', () => {
   const dir = mkdtempSync(join(tmpdir(), 'tokenroom-hook-'));
+  // this test asserts the canonical stamp SHAPE at a healthy 58% — hold the ADR-26 quiet gate
+  // open (critical_pct 100) so quota always renders; the gate's own behavior is in critical.test.mjs
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ critical_pct: 100 }));
   run(['tap'], { input: fixture('statusline-full.json'), env: { TOKENROOM_DIR: dir } });
 
   const r = run(['hook', 'user-prompt-submit'], { input: '{}', env: { TOKENROOM_DIR: dir } });
@@ -79,6 +82,8 @@ test('hook: fresh state → stamp; stale → silent; disabled → silent', () =>
 
 test('two accounts, two sessions: each session sees ITS OWN weekly, never the other (ADR-21)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'tokenroom-multi-'));
+  // asserts per-account quota rendering at 58%/30% — hold the ADR-26 quiet gate open
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ critical_pct: 100 }));
   const base = JSON.parse(fixture('statusline-full.json'));
   // Account A: 5h 58% left, 7d 15% left.  Account B: 5h 30% left, 7d 7% left.
   const A = { ...base, session_id: 'sessA',
