@@ -40,6 +40,7 @@ network (ADR-1). Each invocation is a fresh short-lived node process.
 | `src/events.mjs` | compaction event log + silent-cliff detection + `audit` renderer | best-effort only; never breaks tap/hooks (ADR-5) |
 | `src/checkpoint.mjs` | model-authored survival note (save/take/render) | facts from hooks, judgment from models (ADR-15); capped, 6h staleness |
 | `src/flow.mjs` | velocity engine: transcript flow sampling, calibration, burn enrichment | learned tokens-per-% labeled ≈; idle suppresses warnings; enrichment never breaks base state |
+| `src/facilitator.mjs` | burn-rate segment (via `flow.mjs`'s `mine`) + facilitator-cost hand-off nudge, rate-limited per session | context SIZE, not a delta, drives the nudge; self-contained try/catch, never blocks the stamp (ADR-29) |
 | `src/doctor.mjs` | install diagnosis | flags foreign hooks sharing events; exit 1 on problems |
 | `src/resume.mjs` | deferred-work plan lifecycle: queue + both windows + `armed` | expiry survives a weekly deferral (ADR-25); single file |
 | `src/intent.mjs` | session work-intent (focused run + task queue) | 5th MCP write surface; session-tag+guard like checkpoint; 12h TTL (ADR-25) |
@@ -54,7 +55,8 @@ network (ADR-1). Each invocation is a fresh short-lived node process.
 ## Runtime files (`~/.tokenroom/`)
 
 **Account-scoped (ADR-21):** every account gets its own subtree `accounts/<key>/` holding
-`state.json`, `history.jsonl`, `calib.json`, `flow.jsonl`, `flow-cursors.json`, `bands.json`.
+`state.json`, `history.jsonl`, `calib.json`, `flow.jsonl`, `flow-cursors.json`, `bands.json`,
+`facilitator.json` (per-session nudge cooldown counters, 24h TTL, ADR-29).
 The key is the windows' reset PHASE (`resets_at mod window_length`), stable within an account
 and distinct between accounts — so concurrent sessions on different accounts never clobber
 each other. The tap also keeps a top-level `state.json` POINTER (latest account, for the human
@@ -70,8 +72,9 @@ labels/identity: label → `{keys[], config_dir?, last_seen, last_windows_snapsh
 (must-survive facts, ADR-12) · `intent.json` (session work-intent + task queue, ADR-25) ·
 `events.jsonl` (compaction lifecycle + context anomalies + account switch/rollover +
 resume-continued, capped) · `config.json` (user config: `stamp_enabled`, `ceiling_pct`,
-`mode`, `compact_guard_min`, `launch_gate`, `critical_pct`, `weekly_warning`) ·
-`raw-sample.jsonl` (only with `tap --capture`).
+`mode`, `compact_guard_min`, `launch_gate`, `critical_pct`, `weekly_warning`,
+`facilitator_nudge_enabled`, `facilitator_context_threshold_tokens`,
+`facilitator_nudge_cooldown_turns`) · `raw-sample.jsonl` (only with `tap --capture`).
 
 ## Extension points
 

@@ -48,6 +48,12 @@ test('sessionFlowStats: combined rate, active count, anomaly + isMine', () => {
   assert.equal(sf.anomaly.ratio, 10); // 6000 vs median-of-others 600
   assert.equal(sf.anomaly.isMine, false);
   assert.equal(sessionFlowStats(NOW, 's1').anomaly.isMine, true); // it's me
+  // `mine` (burn-efficiency signal, tokenroom enhancement): the CALLER's own rate,
+  // independent of anomaly status — no caller session → null.
+  assert.equal(sf.mine, null);
+  assert.deepEqual(sessionFlowStats(NOW, 's1').mine, { id: 's1', perMin: 6000 });
+  assert.deepEqual(sessionFlowStats(NOW, 's2').mine, { id: 's2', perMin: 600 });
+  assert.equal(sessionFlowStats(NOW, 'nonexistent-session').mine, null);
 
   // balanced burners → no anomaly
   write([

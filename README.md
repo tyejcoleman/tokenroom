@@ -246,6 +246,15 @@ its reset with nothing wasted and nothing dark. Cruise, don't crash — at both 
   with the `tokenroom_weekly_warning` MCP tool (persists to `config.json`; ADR-27) — note that
   a *newly added* MCP tool needs `/mcp reload` (or a fresh session) before it's callable, even
   though the underlying hook behavior is live immediately on every hook call.
+- **Burn-efficiency signal + facilitator-cost nudge:** `facilitator_nudge_enabled` (default
+  **on**) adds two lines — `burn — ~2k tok/min this session (10m)` (this session's own real
+  spend rate, from the same velocity engine, shown only when meaningful) and, because a
+  long-running driver/orchestrator session resends its *entire* context every turn,
+  `facilitator context ~60k/turn — consider handing off to a fresh session to reset context
+  cost` once this session's context size crosses `facilitator_context_threshold_tokens`
+  (default **50000** tokens — well before the compaction-ceiling warning). Rate-limited to
+  once per `facilitator_nudge_cooldown_turns` turns (default **10**). Disable or raise the
+  threshold in `config.json`; a bad value falls back to the default (ADR-29).
 - **Governor modes:** `mode: performance | ondemand | powersave` shifts *when* tokenroom
   speaks (bands, receipt floors, throttle) — never what it says. Applies without restart.
 - **Opt-in guards:** `compact_guard_min` blocks *auto*-compaction minutes before a reset

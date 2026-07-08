@@ -557,3 +557,61 @@ threading in `src/hook.mjs` (`hookSessionStart`, `hookPostToolUse`) and `bin/tok
 3 new tests in `test/continuity.test.mjs` covering cross-project isolation (symmetric, both
 directions), exact-match + legacy-doc resolution, and the missing-doc no-op — full suite
 (131 tests) green.
+
+## ADR-29 — Burn-efficiency signal + facilitator-cost hand-off nudge (Tye's token-efficiency priority)
+
+tokenroom's existing budget lines are all *quota*-oriented (%-of-cap, "X% left"). Tye cares
+more about burning tokens *efficiently* than about the weekly cap — and named the single
+biggest waste in a long autonomous run: a driver/orchestrator ("facilitator") session's
+context grows every turn, and because the **entire context is resent on every turn**, the
+marginal cost of the *next* turn tracks that ever-growing context size, not a fixed
+per-step cost — turn N always costs more than turn 1, even when the actual work per turn
+hasn't changed. A **fresh** session doing the identical next step is far cheaper. **Decision:**
+add two small, additive lines to the existing UserPromptSubmit stamp, both gated by one new
+switch, `facilitator_nudge_enabled` (default **true**):
+
+1. **Burn-rate segment** — `burn — ~{X} tok/min this session (10m)`, sourced from the
+   existing FAST velocity engine (T2.1, `src/flow.mjs`). `sessionFlowStats` already computed
+   a combined-across-sessions rate and an anomaly check; it now also returns `mine` — the
+   *calling* session's own out-tokens/min over the same real 10-minute window, independent of
+   whether it happens to be anomalous. Surfaced only when "meaningful" (`≥50` tok/min —
+   `MEANINGFUL_BURN_PER_MIN` in `src/hook.mjs`); idle/no-flow-data sessions stay silent. No
+   fabricated numbers: this is the same transcript-derived `output_tokens` flow already
+   sampled by every hook (`sampleFlow`), scoped to the caller's own session tag.
+
+2. **Facilitator-cost nudge** — `facilitator context ~{X}/turn — consider handing off to a
+   fresh session to reset context cost`, firing when THIS session's current context **size**
+   (tokens, not a delta) crosses `facilitator_context_threshold_tokens` (default **50000**,
+   well below the existing ~160k compaction-ceiling warning — a deliberately earlier, distinct
+   COST signal, not a duplicate of the near-ceiling "context getting low" line). Context size
+   is computed directly from the already-tracked `context.window_size × context.used_pct`
+   (`src/state.mjs`'s `parsePayload`) — the real figure the model is about to resend, so
+   "~Xk/turn" is not an estimate. Rate-limited to at most once per
+   `facilitator_nudge_cooldown_turns` UserPromptSubmit turns (default **10**) via a small
+   self-pruning per-session counter (`facilitator.json`, 24h TTL, new file `src/facilitator.mjs`)
+   — first sight above threshold fires immediately (no cold-start silence), then holds for the
+   cooldown window before firing again.
+
+Both new lines share the one enable switch on purpose (a single, simple on/off for "the new
+facilitator-cost feature," rather than two independent flags to reason about) — disabling it,
+or staying below both floors, reproduces byte-identical pre-ADR-29 output. Bad hand-edited
+values (non-boolean enable, non-positive/non-finite threshold, cooldown < 1) fall back to the
+defaults (never-throw discipline, ADR-5). Never-crash: `facilitatorNudge` is fully
+self-contained try/catch (a corrupt `facilitator.json` degrades to a clean first-sight read,
+never blocks the stamp); missing/garbage `context`, `burn`, or flow data anywhere in the path
+resolves to "say nothing" rather than a stack trace or a fabricated figure.
+
+**Enforced by:** `facilitator_nudge_enabled`/`facilitator_context_threshold_tokens`/
+`facilitator_nudge_cooldown_turns` defaults + sanitization in `readConfig` (`src/util.mjs`);
+`facilitatorNudge` in the new `src/facilitator.mjs`; the `mine` field on `sessionFlowStats`
+(`src/flow.mjs`); the two new segments in `hookUserPromptSubmit` (`src/hook.mjs`), placed
+after the existing context line so they never affect the pre-existing `hadWindow` framing.
+20 new tests in `test/facilitator.test.mjs` (unit-level `facilitatorNudge` + `readConfig`
+sanitization, and CLI-integration coverage: fires above threshold, silent below, rate-limited
+across turns, disabled → silent for *both* lines, never-crash on missing context/burn/session
+data and on a corrupt `facilitator.json`, per-session cooldown isolation, no cross-session
+co-attribution on the burn line) plus 5 assertions added to `test/flow.test.mjs` for the new
+`mine` field. One pre-existing test (`test/cli.test.mjs`'s canonical-stamp-shape check) legitimately
+crossed the new default threshold with its 122k-token fixture context — it now opts out via
+`facilitator_nudge_enabled: false`, which doubles as a regression proof that disabled really is
+byte-identical. Full suite: **151 tests green** (131 pre-existing + 20 new).

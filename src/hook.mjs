@@ -8,11 +8,15 @@ import { listPins, renderPins } from './pins.mjs';
 import { takeCheckpoint, renderCheckpoint } from './checkpoint.mjs';
 import { takeContinuity, renderContinuityInjection } from './continuity.mjs';
 import { sampleFlow, sessionFlowStats } from './flow.mjs';
+import { facilitatorNudge } from './facilitator.mjs';
 import { pairAdvice, staleEcho, profileForKey } from './accounts.mjs';
 import { activeIntent, isFocused } from './intent.mjs';
 import { loopActiveForSession, resolveSessionId } from './looprobe.mjs';
 
 const STALE_SEC = 30 * 60;
+// Burn-efficiency signal (tokenroom enhancement): below this out-tokens/min a session
+// reads as idle/trivial — a "~12 tok/min" line is noise, not a meaningful burn-rate figure.
+const MEANINGFUL_BURN_PER_MIN = 50;
 
 // Hooks never receive `rate_limits`, so they resolve their session's account via the map the
 // tap maintains (ADR-21) with quotaScope(): it returns {dir, show, key}. On a machine with ≥2
@@ -613,6 +617,38 @@ export async function hookUserPromptSubmit() {
   } else if (ctx?.used_pct != null) {
     parts.push(`context — ${Math.max(0, Math.round((ctx.compact_ceiling_pct ?? 80) - ctx.used_pct))}% left before compaction${hadWindow ? ' (quota resets do NOT restore context)' : ''}`);
   }
+  // Burn-efficiency signal + facilitator-cost nudge (tokenroom enhancement, Tye's
+  // token-efficiency priority): a per-turn read on how fast THIS session is spending
+  // tokens, plus — for a long-running driver/orchestrator ("facilitator") session — a
+  // nudge to hand off once resending its own growing context every turn is itself the
+  // biggest waste (a fresh session doing the same next step is far cheaper). Both ride
+  // the single `facilitator_nudge_enabled` switch (default on): disabled, or below the
+  // respective floor/threshold, leaves `parts` — and so the emitted stamp — untouched
+  // (byte-identical to pre-enhancement output).
+  if (cfg.facilitator_nudge_enabled) {
+    try {
+      // sessionFlowStats filters by the `s` session tag on each sample, so this is
+      // THIS session's own real out-tokens/min regardless of account-dir attribution —
+      // unlike the window %/cost figures above, no cross-account risk to gate on.
+      const sf = sessionFlowStats(Date.now() / 1000, mySession, dir);
+      if (sf?.mine && sf.mine.perMin >= MEANINGFUL_BURN_PER_MIN) {
+        parts.push(`burn — ~${fmtTokens(sf.mine.perMin)} tok/min this session (10m)`);
+      }
+    } catch {
+      // best-effort; a missing/corrupt flow log must never block the stamp
+    }
+    try {
+      // Current context SIZE (not a delta) is what actually gets resent — and paid for
+      // — on the NEXT turn, so it doubles as the real "cost per turn" figure.
+      const ctxTokensUsed =
+        typeof ctx?.window_size === 'number' && typeof ctx?.used_pct === 'number' ? Math.round((ctx.window_size * ctx.used_pct) / 100) : null;
+      const nudge = ctxTokensUsed != null ? facilitatorNudge(mySession, ctxTokensUsed, cfg, Date.now() / 1000, dir) : null;
+      if (nudge) parts.push(nudge);
+    } catch {
+      // best-effort; never block the stamp over the nudge
+    }
+  }
+
   const plan = readResume();
   if (resumeReady(plan)) {
     parts.push(`deferred work now ready: "${String(plan.summary ?? '').slice(0, 60)}"${plan.queue?.length ? ` (${plan.queue.length} queued${plan.armed ? ', armed — auto-continues in-session' : ''})` : ''}`);

@@ -234,6 +234,20 @@ export function readConfig() {
     // entirely; 'auto' (opt-in) additionally suppresses it while a belay loop is armed for
     // this session, on the theory that an active autonomous loop is already pacing itself.
     weekly_warning: 'on',
+    // Facilitator burn-efficiency signal (tokenroom enhancement): master switch for BOTH
+    // the per-turn burn-rate segment (tok/min, this session) and the facilitator-cost
+    // hand-off nudge in the UserPromptSubmit stamp. Default ON — the nudge only fires
+    // once this session's context genuinely crosses the threshold below, so it stays
+    // quiet-until-it-matters (ADR-26 spirit) without requiring opt-in.
+    facilitator_nudge_enabled: true,
+    // Context tokens (the current context SIZE, i.e. what gets resent every turn) at/above
+    // which the facilitator-cost nudge fires. Deliberately well below the compaction
+    // ceiling (~160k at the 80% default) — this is a distinct, earlier COST signal, not a
+    // duplicate of the existing near-ceiling "context getting low" line.
+    facilitator_context_threshold_tokens: 50000,
+    // Minimum UserPromptSubmit turns between nudge firings for one session — keeps it
+    // non-spammy on a long run that stays above the threshold.
+    facilitator_nudge_cooldown_turns: 10,
     ...(readJSON(join(tokenroomDir(), 'config.json')) ?? {}),
   };
   // Defensive (never-throw discipline, ADR-5): a hand-edited critical_pct that isn't a real
@@ -245,6 +259,14 @@ export function readConfig() {
   // (missing, hand-typo'd, wrong type) falls back to 'on' — the safer default is to WARN,
   // never to silently swallow a genuinely binding weekly constraint.
   cfg.weekly_warning = ['on', 'off', 'auto'].includes(cfg.weekly_warning) ? cfg.weekly_warning : 'on';
+  // Same defensive discipline for the facilitator signal: a hand-edited bad value never
+  // crashes and never silently produces nonsense (e.g. a negative or non-numeric
+  // threshold that would fire on every turn, or a cooldown of 0 that defeats rate-limiting).
+  cfg.facilitator_nudge_enabled = typeof cfg.facilitator_nudge_enabled === 'boolean' ? cfg.facilitator_nudge_enabled : true;
+  const fct = cfg.facilitator_context_threshold_tokens;
+  cfg.facilitator_context_threshold_tokens = typeof fct === 'number' && Number.isFinite(fct) && fct > 0 ? fct : 50000;
+  const fcd = cfg.facilitator_nudge_cooldown_turns;
+  cfg.facilitator_nudge_cooldown_turns = typeof fcd === 'number' && Number.isFinite(fcd) && fcd >= 1 ? Math.round(fcd) : 10;
   return cfg;
 }
 

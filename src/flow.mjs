@@ -116,6 +116,10 @@ export function flowStats(nowSec = Date.now() / 1000, dir = tokenroomDir()) {
  * sample time; pre-tag samples (no `s`) fold into "unknown" and degrade gracefully.
  * Anomaly = a session burning >= ANOMALY_RATIO x the median of the others, above a
  * floor (so two quiet sessions don't trip it). Returns null when there's nothing to say.
+ * `mine` (burn-efficiency signal, tokenroom enhancement): the CALLING session's own
+ * out-tokens/min over the same 10min window, independent of whether it happens to be
+ * anomalous — the per-session rate `anomaly` only surfaces conditionally. Reuses this
+ * same per-session aggregation rather than a second pass over the flow log.
  */
 const ANOMALY_RATIO = 3;
 const ANOMALY_FLOOR_PER_MIN = 200; // out-tokens/min below this is "not really burning"
@@ -144,7 +148,8 @@ export function sessionFlowStats(nowSec = Date.now() / 1000, mySession = null, d
       }
     }
   }
-  return { burning, combinedPerMin, anomaly };
+  const mine = mySession != null ? per.find((p) => p.id === mySession) ?? null : null;
+  return { burning, combinedPerMin, anomaly, mine };
 }
 
 /**
