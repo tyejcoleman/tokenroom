@@ -89,6 +89,9 @@ readiness stamps) · per-account isolation (ADR-21) + multi-account profiles, in
 switch detection, echo honesty, pair-aware descent, `tokenroom account/switch/run`
 (ADR-24) · aggressive descent to a 1% floor (ADR-19) · multi-session burn disclosure
 (ADR-20) · governor modes · opt-in compact guard + launch gate ·
+work-intent + in-session auto-resume (ADR-25: `set_intent`/`tokenroom intent` focused runs
+burn to the 1% floor, warn-and-arm launch gate, armed `plan_resume` queue tracking BOTH
+windows, Stop-hook in-session continuation — never headless, holds the ADR-22 boundary) ·
 `tokenroom watch/line/audit/doctor` · ADR log · eval report generator.
 
 **Remaining, in order:** rotate the npm token (USER — the 0.6.0 release still rode the
@@ -97,3 +100,8 @@ user green light) → post-launch: T3.1 credit meter and T3.2 Codex adapter
 (both data-gated), Pro only per `docs/PRO.md` gates (V1 demand kill-criteria — no
 payments before two paying pilots). Follow-up from the 2026-07-02 eval: ADR-20's
 "ease off" phrasing is not acted on by small models (B-1 Haiku miss) — candidate tighten.
+**ADR-25 wording is NOT yet eval'd** (the focused-descent, warn-and-arm, and Stop-hook
+continuation text) — it must run `/run-evals` in the next harden round and gates the next
+release; the default (non-focused) path is byte-identical to shipped, already-eval'd text.
+The build (2026-07-05) is code-complete + 96 tests green; not yet `tokenroom install`ed on
+this machine, so the live hooks are still 0.6.0 until the user reinstalls.

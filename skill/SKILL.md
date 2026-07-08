@@ -205,6 +205,40 @@ sign.** Only quota (rate-limit) tiredness throttles work, and it recovers only a
 clock; never confuse the two. Filling context is the path to the refresh, not a danger to
 avoid.
 
+## Declare a focused run so tokenroom stops slowing you down
+
+By default tokenroom paces a one-off task cautiously — it eases off at 5% and defers big
+work to be safe. That is wrong for a **long multi-step build, migration, or convergence
+loop**, where the run is worth burning the window down for and stopping every reset is the
+real waste. Tell tokenroom the shape of the run and it changes its whole posture. At the
+START of such work call **`set_intent`** with `kind: convergence` (or `long_running` /
+`priority`) and the task `queue` — the remaining work list. While a focused intent is
+active:
+
+- **It burns to the 1% floor, not to 5%.** The 1–5% "be mindful / defer a huge task"
+  throttle is suppressed; you keep FULL SPEED down to the 1% floor. Quota left unspent
+  before a reset is wasted — a declared run spends it.
+- **Before a big INDIVISIBLE launch in a thin window it WARNS — it does not stop you.** A
+  subagent, workflow, or Task launched at ≤5% can't be checkpointed mid-flight, so tokenroom
+  gives you a resource-aware heads-up and records an *armed* resume plan so the launch
+  auto-continues after the reset if it doesn't finish. You can keep going: proceed if the
+  work is divisible/checkpointable, or do a small piece first — your call, nothing is lost.
+- **At the 1% floor, arm the queue instead of just stopping.** Commit in-flight work,
+  `checkpoint`, then `plan_resume` the REMAINING QUEUE with `arm: true`. If you will be
+  idle until the reset, also schedule a wakeup at the reset time (the harness
+  `ScheduleWakeup`). Tokenroom's **Stop hook** then continues this SAME session
+  automatically once the window resets — no manual restart, and no headless spend (it is
+  the interactive session whose quota you deferred). It re-fires until the queue is done, so
+  when it genuinely is, run `tokenroom resume --clear` and set `kind: default`.
+
+Weekly vs 5h: if the **7-day** window is the binding constraint (a "weekly pace is HOT"
+stamp), pass `blocked_on: 'seven_day'` to `plan_resume` — readiness and auto-resume then
+fire at the *weekly* reset, not the 5h one.
+
+Focused intent is opt-in on purpose: a normal task is never surprised into burning to 1% or
+into a session that won't stop. Only declare it for work you actually want driven to the
+floor and resumed across resets — and clear it (`kind: default`) when that work ends.
+
 ## Long-running work: a clean boundary is a checkpoint, not a stop
 
 A natural pause point — tests green, a commit landed — is a **checkpoint, not a reason to

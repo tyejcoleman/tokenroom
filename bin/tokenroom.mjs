@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { tap } from '../src/tap.mjs';
-import { hookUserPromptSubmit, hookPreCompact, hookSessionStart, hookPostCompact, hookPostToolUse, hookPreToolUse } from '../src/hook.mjs';
+import { hookUserPromptSubmit, hookPreCompact, hookSessionStart, hookPostCompact, hookPostToolUse, hookPreToolUse, hookStop } from '../src/hook.mjs';
 import { addPin, listPins, removePins } from '../src/pins.mjs';
 import { renderAudit } from '../src/events.mjs';
 import { mcpServe } from '../src/mcp.mjs';
@@ -33,6 +33,7 @@ switch (cmd) {
       else if (argv[0] === 'post-compact') await hookPostCompact();
       else if (argv[0] === 'pre-tool-use') await hookPreToolUse();
       else if (argv[0] === 'post-tool-use') await hookPostToolUse();
+      else if (argv[0] === 'stop') await hookStop();
     } catch {
       process.exitCode = 0;
     }
@@ -75,6 +76,20 @@ switch (cmd) {
     } else {
       const plan = readResume();
       console.log(plan ? JSON.stringify(plan, null, 2) : 'no resume plan recorded');
+    }
+    break;
+  }
+  case 'intent': {
+    const { activeIntent, setIntent, clearIntent, renderIntent } = await import('../src/intent.mjs');
+    const sub = argv[0];
+    if (sub === 'clear') {
+      console.log(clearIntent() ? 'work-intent cleared' : 'no work-intent to clear');
+    } else if (['convergence', 'long_running', 'priority', 'default'].includes(sub)) {
+      const note = argv.slice(1).join(' ') || null;
+      const it = setIntent({ kind: sub, note });
+      console.log(`work-intent set: ${it.kind}${it.note ? ` — ${it.note}` : ''} (burn to the 1% floor; queue arms for in-session resume)`);
+    } else {
+      console.log(renderIntent(activeIntent(null)));
     }
     break;
   }
@@ -142,7 +157,8 @@ usage:
   tokenroom status                                                print the current ResourceState
   tokenroom watch                                                 LIVE dashboard (1s ticks) for a second pane
   tokenroom line                                                  one live line (countdowns at call time) for tmux/xbar/waybar
-  tokenroom resume [--clear]                                      show or clear the deferred-work plan
+  tokenroom resume [--clear]                                      show or clear the deferred-work plan (queue + armed state)
+  tokenroom intent [convergence|long_running|priority|default|clear] ["note"]   declare a focused run: burn to the 1% floor + arm the queue for in-session resume
   tokenroom account [list]                                        profiles + unlabeled account buckets, with last-known quota
   tokenroom account label <name>                                  name the account you are currently on (identity for phase buckets)
   tokenroom account fold <key> <name>                             fold a bucket into a profile (see list for hints)
@@ -155,6 +171,6 @@ usage:
   tokenroom audit [--since <hours>]                               timeline of the awareness loop (default 6h)
   tokenroom doctor                                                diagnose the install (wiring, freshness, conflicts)
   tokenroom tap [--capture]      (statusline command — wired by install)
-  tokenroom hook <user-prompt-submit|pre-tool-use|post-tool-use|pre-compact|post-compact|session-start>   (hook commands — wired by install)
+  tokenroom hook <user-prompt-submit|pre-tool-use|post-tool-use|pre-compact|post-compact|session-start|stop>   (hook commands — wired by install)
   tokenroom mcp                                    (stdio MCP server — wired by install)`);
 }

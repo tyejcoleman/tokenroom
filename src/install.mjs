@@ -119,7 +119,8 @@ export function install(argv = []) {
     ['SessionStart', 'hook session-start', 'post-compaction re-injection + pins + deferred-work readiness'],
     ['PostCompact', 'hook post-compact', 'compaction event log (observability)'],
     ['PostToolUse', 'hook post-tool-use', 'mid-turn band-crossing re-stamps + cost receipts'],
-    ['PreToolUse', 'hook pre-tool-use', 'launch gate (opt-in via launch_gate config)', 'Task|Agent|Workflow'],
+    ['PreToolUse', 'hook pre-tool-use', 'launch gate (opt-in via launch_gate config or a focused intent)', 'Task|Agent|Workflow'],
+    ['Stop', 'hook stop', 'in-session auto-resume of an armed queue once the window resets (opt-in via a focused intent)'],
   ];
   for (const [event, sub, label, matcher] of HOOK_EVENTS) {
     settings.hooks[event] ??= [];

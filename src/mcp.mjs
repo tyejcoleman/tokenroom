@@ -6,6 +6,7 @@ import { readState } from './state.mjs';
 import { accountDir, activeAccountKeys } from './util.mjs';
 import { fitCheck, estimateRemaining } from './fit.mjs';
 import { planResume } from './resume.mjs';
+import { setIntent } from './intent.mjs';
 import { addPin } from './pins.mjs';
 import { saveCheckpoint } from './checkpoint.mjs';
 import { saveContinuity } from './continuity.mjs';
@@ -47,14 +48,30 @@ const TOOLS = [
   {
     name: 'plan_resume',
     description:
-      'Record a resume plan for work deferred past the rate-limit reset (use after fit_check says defer). Tokenroom shows a countdown in the HUD and flags the work as ready in prompt stamps once the window resets.',
+      'Record a resume plan for work deferred past a rate-limit reset (use after fit_check says defer, or at the 1% floor). Pass a `queue` of the remaining tasks so a long-running process keeps its full work list across the reset, and `blocked_on` to say WHICH window gates it (five_hour or seven_day) so readiness fires at the right reset. With `arm:true` inside a focused run (see set_intent), tokenroom CONTINUES the queue in THIS session automatically once the window resets — no manual restart. Tokenroom shows a countdown in the HUD and flags readiness in prompt stamps.',
     inputSchema: {
       type: 'object',
       properties: {
-        summary: { type: 'string', description: 'what to resume and where to pick it up (one or two sentences)' },
+        summary: { type: 'string', description: 'what to resume and where to pick it up (one or two sentences); optional if queue is given' },
+        queue: { type: 'array', items: { type: 'string' }, description: 'the remaining tasks to run after the reset, in order (each a short imperative)' },
+        blocked_on: { type: 'string', enum: ['five_hour', 'seven_day'], description: 'which window must reset before this is runnable (default five_hour; use seven_day when the weekly window is the binding constraint)' },
+        arm: { type: 'boolean', description: 'true → auto-continue this queue in-session once the window resets (only takes effect inside a focused run; default false)' },
         est_tokens: { type: 'number', description: 'estimated tokens the deferred work needs (optional)' },
       },
-      required: ['summary'],
+    },
+  },
+  {
+    name: 'set_intent',
+    description:
+      'Declare the SHAPE of the current run so tokenroom paces to match it. kind=convergence|long_running|priority marks a FOCUSED run: tokenroom then keeps you at FULL SPEED down to the 1% quota floor (no cautious early-defer throttling at 5%), warns-and-arms before a big indivisible launch would die in a thin window, and at the floor arms your remaining queue to auto-resume IN THIS SESSION after the reset instead of stopping. Pass the task `queue` so a long-running process keeps its work list. kind=default restores the normal one-off descent. Call this at the START of a big multi-step build, migration, or convergence loop; clear it (kind=default) when the run ends.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['convergence', 'long_running', 'priority', 'default'], description: 'run shape; the first three are focused (burn to the floor + arm resume), default = normal cautious descent' },
+        note: { type: 'string', description: 'one line on what this run is (optional)' },
+        queue: { type: 'array', items: { type: 'string' }, description: 'the task list to keep running across resets (optional; each a short imperative)' },
+      },
+      required: ['kind'],
     },
   },
   {
@@ -199,6 +216,19 @@ export function mcpServe() {
         result = pin
           ? { pinned: true, id: pin.id, text: pin.text, expires_at: pin.expires_at }
           : { pinned: false, error: 'text (non-empty string) is required' };
+      } else if (name === 'set_intent') {
+        // works without state — declaring the run shape must never depend on the tap being live
+        const it = setIntent(args);
+        const focused = ['convergence', 'long_running', 'priority'].includes(it.kind);
+        result = {
+          set: true,
+          kind: it.kind,
+          focused,
+          queued: it.queue.length,
+          note: focused
+            ? `Focused run (${it.kind}): tokenroom keeps you at full speed to the 1% floor (no early-defer throttling), warns-and-arms before a big launch would die thin, and at the floor arms your queue to auto-resume IN THIS SESSION after the reset. Pass a queue here or via plan_resume(arm:true).`
+            : 'Intent cleared to default — normal cautious descent restored.',
+        };
       } else if (!state) {
         result = { error: 'no ResourceState collected yet — install the statusline tap (tokenroom install) and use Claude Code once' };
       } else if (name === 'resource_state') {
@@ -219,7 +249,8 @@ export function mcpServe() {
           result?.overall ??
           (result?.recorded != null ? 'recorded' : null) ??
           (result?.pinned != null ? 'pinned' : null) ??
-          (result?.saved != null ? 'saved' : null),
+          (result?.saved != null ? 'saved' : null) ??
+          (result?.set != null ? `intent:${result.kind}` : null),
       });
       send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result, null, 1) }] } });
     } else if (id !== undefined && method) {
