@@ -1,5 +1,7 @@
 import { readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { tokenroomDir, ensureDir, atomicWrite, atomicWriteJSON, readJSON, fmtClock } from './util.mjs';
 import { readState } from './state.mjs';
 
@@ -25,6 +27,42 @@ const docPathFor = (key) => join(contDir(), `${key}.md`);
 const metaPathFor = (key) => join(contDir(), `${key}.meta.json`);
 // filesystem-safe key from a session id; anything odd collapses to a single shared doc
 const keyFor = (sid) => (typeof sid === 'string' && /^[\w.-]{1,128}$/.test(sid) ? sid : 'session');
+
+// ── Project scoping (ADR-28) ────────────────────────────────────────────────
+// ~/.tokenroom is ONE global directory shared by every project on the machine, but a
+// continuity doc only means something to the project it was written in. `project` is the
+// cwd's git repo root (stable across subdirectories of one checkout; a session's cwd can
+// move around inside a repo without losing its doc), falling back to the raw cwd for
+// non-git working dirs. Never throws — an unresolvable project just means this call can't
+// scope by project, which downgrades to the pre-ADR-28 session-only lookup (still safe: see
+// `takeContinuity`, where the un-scoped legacy fallback is only ever reachable when NEITHER
+// side of the exchange can resolve a project — real hook/MCP traffic always supplies a cwd).
+const projectFor = (cwd) => {
+  if (typeof cwd !== 'string' || !cwd) return null;
+  try {
+    const root = execFileSync('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (root) return root;
+  } catch {
+    // not a git repo (or git unavailable) — the cwd itself is still a valid project boundary
+  }
+  return cwd;
+};
+// short filesystem-safe fingerprint of a resolved project path (paths contain '/', which a
+// bare doc key cannot)
+const projectKeyFor = (cwd) => {
+  const p = projectFor(cwd);
+  return p ? 'p' + createHash('sha1').update(p).digest('hex').slice(0, 12) : null;
+};
+// composite (session, project) doc key. No resolvable project (cwd absent/invalid) → the
+// bare pre-ADR-28 session key, so call sites that genuinely have no cwd keep working exactly
+// as before.
+const compositeKey = (session_id, cwd) => {
+  const pk = projectKeyFor(cwd);
+  return pk ? `${keyFor(session_id)}__${pk}` : keyFor(session_id);
+};
 
 const MAX_AGE_SEC = 24 * 3600; // a handoff doc untouched for a day is probably a stale task
 const PRUNE_SEC = 7 * 24 * 3600;
@@ -86,12 +124,14 @@ export function saveContinuity(args, nowSec = Date.now() / 1000) {
     open_questions: trimList(args.open_questions, CAP.list),
   };
   if (!d.mission && !d.next_steps.length) return null;
-  const key = keyFor(session_id);
+  const project = projectFor(args.cwd);
+  const key = compositeKey(session_id, args.cwd);
   ensureDir(contDir());
   const path = docPathFor(key);
   atomicWrite(path, renderDoc(d));
   atomicWriteJSON(metaPathFor(key), {
     session_id,
+    project,
     at: d.at,
     cwd: d.cwd,
     title: d.mission ? d.mission.split('\n')[0].slice(0, 100) : null,
@@ -101,13 +141,32 @@ export function saveContinuity(args, nowSec = Date.now() / 1000) {
   return { path, key };
 }
 
-/** Fetch the handoff doc for a compacting session: prefer the session-tagged doc, fall
- *  back to an untagged one (MCP could not read the session id). Defensive throughout — a
- *  bad read must never break SessionStart re-injection. */
-export function takeContinuity(session_id, nowSec = Date.now() / 1000) {
+/** Fetch the handoff doc for a compacting session: prefer the (session, project)-tagged
+ *  doc, then an untagged-session doc scoped to THIS project, then legacy pre-ADR-28 bare
+ *  keys as a last resort (only reachable when this call itself has no project to scope by).
+ *  `cwd` is the CURRENT session's own working dir (from the hook payload) — it is what
+ *  proves a candidate belongs to THIS project; a doc written under a different project can
+ *  never match here, because every project-scoped candidate is built from THIS call's own
+ *  pk, never another project's. Defensive throughout — a bad read must never break
+ *  SessionStart re-injection. */
+export function takeContinuity(session_id, cwd, nowSec = Date.now() / 1000) {
   try {
+    const pk = projectKeyFor(cwd);
+    const sk = keyFor(session_id);
+    const candidates = [];
+    if (pk) {
+      candidates.push(`${sk}__${pk}`); // this session, this project
+      candidates.push(`session__${pk}`); // untagged-session doc, still scoped to THIS project
+    }
+    candidates.push(sk); // legacy pre-ADR-28 doc, no project tag — matched by session id below
+    // The fully-untagged legacy fallback (no session tag either) is the one path that used
+    // to cross projects (a Nomos doc reaching an unrelated openkakushin session). It stays
+    // reachable ONLY when this call has no project to scope by at all — real hook/MCP
+    // traffic always supplies a cwd, so in production this branch is dead and the collision
+    // it used to cause cannot happen.
+    if (!pk) candidates.push('session');
     const seen = new Set();
-    for (const key of [keyFor(session_id), 'session']) {
+    for (const key of candidates) {
       if (seen.has(key)) continue;
       seen.add(key);
       const meta = readJSON(metaPathFor(key));
@@ -137,16 +196,23 @@ export function renderContinuityInjection(m) {
   return L.join('\n');
 }
 
-/** Most recently updated handoff doc across sessions (for `tokenroom handoff`). */
-export function latestContinuity() {
+/** Most recently updated handoff doc, for the interactive `tokenroom handoff` CLI. With a
+ *  `cwd`, prefers docs tagged to THAT project (ADR-28) — so running it from project B never
+ *  shows project A's doc merely because it's newer. Falls back to the global most-recent
+ *  when no doc is tagged to this project (no cwd given, or nothing here matches yet) — the
+ *  original cross-session behavior, unchanged when cwd is omitted. */
+export function latestContinuity(cwd) {
   try {
     const metas = readdirSync(contDir())
       .filter((f) => f.endsWith('.meta.json'))
       .map((f) => ({ key: f.replace(/\.meta\.json$/, ''), meta: readJSON(join(contDir(), f)) }))
       .filter((x) => x.meta);
     if (!metas.length) return null;
-    metas.sort((a, b) => (b.meta.at ?? 0) - (a.meta.at ?? 0));
-    const { key, meta } = metas[0];
+    const project = projectFor(cwd);
+    const scoped = project ? metas.filter((x) => x.meta.project === project) : [];
+    const pool = scoped.length ? scoped : metas;
+    pool.sort((a, b) => (b.meta.at ?? 0) - (a.meta.at ?? 0));
+    const { key, meta } = pool[0];
     const path = docPathFor(key);
     return { meta, path, markdown: existsSync(path) ? readFileSync(path, 'utf8') : null };
   } catch {

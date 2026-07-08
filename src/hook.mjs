@@ -169,7 +169,7 @@ export async function hookPostToolUse() {
     let savedRecently = false;
     let savedNote = '';
     if (ctxLeft != null) {
-      const savedAt = Math.max(takeCheckpoint(p.session_id)?.at ?? 0, takeContinuity(p.session_id)?.at ?? 0);
+      const savedAt = Math.max(takeCheckpoint(p.session_id)?.at ?? 0, takeContinuity(p.session_id, p.cwd)?.at ?? 0);
       const ago = savedAt ? now - savedAt : null;
       savedRecently = ago != null && ago < 150; // ~2.5 min: already captured, don't re-prompt
       savedNote = ago != null ? ` (handoff already saved ${ago < 90 ? 'moments' : `${Math.round(ago / 60)}m`} ago — don't re-save unless state changed)` : '';
@@ -410,8 +410,9 @@ export async function hookSessionStart() {
     if (snap) parts.push(renderHandoff(snap));
     const note = takeCheckpoint(p.session_id);
     if (note) parts.push(renderCheckpoint(note));
-    // the rich, model-authored canonical handoff doc (ADR-18): pointer + digest, read on demand
-    const doc = takeContinuity(p.session_id);
+    // the rich, model-authored canonical handoff doc (ADR-18); project-scoped (ADR-28) so a
+    // different project's doc can never surface here — pointer + digest, read on demand
+    const doc = takeContinuity(p.session_id, p.cwd);
     if (doc) parts.push(renderContinuityInjection(doc));
     const pins = listPins();
     if (pins.length) parts.push(renderPins(pins));

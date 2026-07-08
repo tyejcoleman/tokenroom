@@ -59,7 +59,7 @@ switch (cmd) {
   }
   case 'handoff': {
     const { latestContinuity } = await import('../src/continuity.mjs');
-    const h = latestContinuity();
+    const h = latestContinuity(process.cwd());
     if (!h) console.log('no handoff doc yet — the agent writes one via the tokenroom `handoff` MCP tool');
     else if (argv[0] === '--path') console.log(h.path);
     else console.log(h.markdown ?? `handoff doc at ${h.path} (unreadable)`);

@@ -151,6 +151,107 @@ test('handoff doc: stale doc and wrong-session doc are not re-injected', () => {
   assert.equal(run(['hook', 'session-start'], { input: JSON.stringify({ session_id: 'sess-B', source: 'compact' }), env: env2 }).stdout, '');
 });
 
+// ADR-28: continuity docs are keyed by (session, project) — a doc written under one
+// project's cwd must never be re-injected into a session whose cwd is a DIFFERENT project,
+// even when neither side can resolve a session id (the exact shape of the live bug: a
+// Nomos-project doc served into an unrelated openkakushin session).
+test('ADR-28: continuity docs are scoped by (session, project) — no cross-project collision', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tokenroom-proj-'));
+  const env = { TOKENROOM_DIR: dir };
+  const projA = mkdtempSync(join(tmpdir(), 'tokenroom-projA-')); // stands in for "Nomos"
+  const projB = mkdtempSync(join(tmpdir(), 'tokenroom-projB-')); // stands in for "openkakushin"
+
+  // Project A writes a handoff doc with no resolvable session id (the MCP-call-carries-no-
+  // session-id case that produced the untagged doc in the field) — pre-fix this landed in
+  // the single global `continuity/session.md` shared by every project on the machine.
+  saveDoc({ mission: 'Build Nomos: the mission statement', next_steps: ['keep going'], cwd: projA }, env);
+
+  // A session whose cwd is project B, resuming after compaction, must NOT see project A's
+  // doc — clean no-op, not a cross-project leak.
+  const crossed = run(['hook', 'session-start'], {
+    input: JSON.stringify({ session_id: 'ok-session', source: 'compact', cwd: projB }),
+    env,
+  });
+  assert.equal(crossed.stdout, '');
+
+  // The SAME project (A), even with a different/unresolved session id on the read side,
+  // still gets its own doc back — same-project resume is preserved.
+  const same = JSON.parse(
+    run(['hook', 'session-start'], { input: JSON.stringify({ session_id: 'ok-session', source: 'compact', cwd: projA }), env }).stdout
+  ).hookSpecificOutput.additionalContext;
+  assert.match(same, /Build Nomos: the mission statement/);
+
+  // Project B writes its OWN doc; project A must not see it either (collision is symmetric).
+  saveDoc({ mission: 'openkakushin: lift the next function', next_steps: ['recomp'], cwd: projB }, env);
+  const aSeesOwn = JSON.parse(
+    run(['hook', 'session-start'], { input: JSON.stringify({ session_id: 'x', source: 'compact', cwd: projA }), env }).stdout
+  ).hookSpecificOutput.additionalContext;
+  assert.match(aSeesOwn, /Build Nomos/);
+  assert.doesNotMatch(aSeesOwn, /openkakushin/);
+  const bSeesOwn = JSON.parse(
+    run(['hook', 'session-start'], { input: JSON.stringify({ session_id: 'y', source: 'compact', cwd: projB }), env }).stdout
+  ).hookSpecificOutput.additionalContext;
+  assert.match(bSeesOwn, /openkakushin/);
+  assert.doesNotMatch(bSeesOwn, /Build Nomos/);
+});
+
+test('ADR-28: exact (session, project) match resolves first; legacy undated doc still resolves for its own session, and is not cross-served', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tokenroom-proj2-'));
+  const env = { TOKENROOM_DIR: dir };
+  const proj = mkdtempSync(join(tmpdir(), 'tokenroom-projC-'));
+  const now = Math.round(Date.now() / 1000);
+
+  // Give this account a resolvable session id (as a real tapped session would), then save —
+  // this exercises the precise (session, project) composite key, not the untagged fallback.
+  writeFileSync(
+    join(dir, 'state.json'),
+    JSON.stringify({ schema: 'resource-state/v0', updated_at: now, session_id: 'sess-exact', windows: {}, burn: {}, session: {} })
+  );
+  saveDoc({ mission: 'exact session+project handoff', next_steps: ['finish it'], cwd: proj }, env);
+  const exact = JSON.parse(
+    run(['hook', 'session-start'], { input: JSON.stringify({ session_id: 'sess-exact', source: 'compact', cwd: proj }), env }).stdout
+  ).hookSpecificOutput.additionalContext;
+  assert.match(exact, /exact session\+project handoff/);
+
+  // A pre-ADR-28 legacy doc: bare session key, no `project` field at all, written directly
+  // (as old code would have). It still resolves for a SessionStart call that matches its own
+  // session id...
+  const dir2 = mkdtempSync(join(tmpdir(), 'tokenroom-proj3-'));
+  const env2 = { TOKENROOM_DIR: dir2 };
+  mkdirSync(join(dir2, 'continuity'), { recursive: true });
+  writeFileSync(
+    join(dir2, 'continuity', 'sess-legacy.meta.json'),
+    JSON.stringify({ session_id: 'sess-legacy', at: now, digest: { mission: 'pre-fix doc', next: 'y' } })
+  );
+  writeFileSync(join(dir2, 'continuity', 'sess-legacy.md'), '# legacy doc\n');
+  const legacyOwn = JSON.parse(
+    run(['hook', 'session-start'], { input: JSON.stringify({ session_id: 'sess-legacy', source: 'compact' }), env: env2 }).stdout
+  ).hookSpecificOutput.additionalContext;
+  assert.match(legacyOwn, /pre-fix doc/);
+  // ...but is NOT cross-served to a different session (with or without a cwd).
+  assert.equal(
+    run(['hook', 'session-start'], { input: JSON.stringify({ session_id: 'someone-else', source: 'compact' }), env: env2 }).stdout,
+    ''
+  );
+  assert.equal(
+    run(['hook', 'session-start'], {
+      input: JSON.stringify({ session_id: 'someone-else', source: 'compact', cwd: mkdtempSync(join(tmpdir(), 'tokenroom-projD-')) }),
+      env: env2,
+    }).stdout,
+    ''
+  );
+});
+
+test('ADR-28: missing doc is a clean no-op even when cwd/project is known', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tokenroom-proj4-'));
+  const env = { TOKENROOM_DIR: dir };
+  const proj = mkdtempSync(join(tmpdir(), 'tokenroom-projE-'));
+  assert.equal(
+    run(['hook', 'session-start'], { input: JSON.stringify({ session_id: 'nobody', source: 'compact', cwd: proj }), env }).stdout,
+    ''
+  );
+});
+
 test('ctx mid-turn: super-close fires exactly once (velocity-timed, not redundant)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'tokenroom-sc-'));
   const env = { TOKENROOM_DIR: dir };

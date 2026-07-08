@@ -498,3 +498,62 @@ change; `'on'` stays the shipped default and is provably byte-identical to today
 tests: armed/paused/session-mismatch/global-scope/missing-belay/corrupt-JSON/malformed-shape
 matrix) and `test/weekly-warning.test.mjs` (12 tests: default/sanitize/on-byte-identical/
 off/auto×{active,none,paused,other-session,garbled,absent}/5h-line-untouched/MCP round-trip).
+
+## ADR-28 — Continuity docs are keyed by (session, project), not session alone (amends ADR-18)
+
+**Bug (observed live):** a Claude Code session working in project *openkakushin*
+(`session_id` `1fdf3400-…`) had its SessionStart(compact) `additionalContext` injected with a
+*different project's* handoff doc — a Nomos-project doc (mission "Build Nomos…") — and
+openkakushin's own doc appeared to have been overwritten. State from one project leaked into
+an unrelated one.
+
+**Root cause:** `~/.tokenroom` is a *single global directory* shared by every project on the
+machine, and the continuity doc scheme (`src/continuity.mjs`) keyed docs by session id
+*alone* — `continuity/<session>.md` — with no project dimension anywhere. Worse, the `handoff`
+MCP tool carries no session id from the caller (documented in the file header), so
+`saveContinuity` tags the doc with whatever `readState().session_id` happens to be — the most
+recently *tapped* session, which can be null (fresh account, no tap yet) or, on a machine
+running several concurrent Claude Code sessions across different projects, simply the wrong
+one. An untagged write (`session_id: null`) fell through to the single shared bucket
+`continuity/session.{md,meta.json}` — the SAME file for every project on the box. Two
+compounding effects followed: (1) **latest-wins overwrite** — a `handoff` call from ANY
+project with an unresolved session id clobbered that one global file, explaining "my own
+handoff appears to have been overwritten"; (2) **blind fallback on read** — `takeContinuity`'s
+guard, `if (meta.session_id && session_id && meta.session_id !== session_id) continue`, is a
+no-op whenever *either* side is null, so an untagged doc (from any project) satisfied *any*
+session's lookup, explaining "a Nomos doc reached an openkakushin session." Project was never
+part of the key or the match — session-id ambiguity alone was enough to cross projects.
+
+**Fix:** every continuity doc is now keyed by the composite **(session, project)**, where
+`project` = the writer's cwd's git repo root (`git -C <cwd> rev-parse --show-toplevel`),
+falling back to the raw cwd for non-git directories, and to "no project" (pre-ADR-28 bare
+key) only when cwd itself is unresolvable — never-throw throughout (`projectFor`/
+`projectKeyFor` in `src/continuity.mjs`). `saveContinuity` writes to
+`continuity/<session-or-'session'>__<project-fingerprint>.{md,meta.json}` and stamps the
+resolved `project` into the meta sidecar. `takeContinuity(session_id, cwd)` builds its lookup
+candidates **only from its own resolved project**: `(session, project)` exact match, then
+`(untagged-session, SAME project)`, then — solely when *this* call itself has no project to
+scope by — the pre-ADR-28 bare `<session>` / bare `session` keys, for backward compatibility
+with docs written before this fix. Because every project-scoped candidate is built from the
+reading call's *own* `cwd`, there is no code path left that can construct a candidate
+belonging to a *different* project — the blind "any untagged doc matches" fallback that
+caused the collision is only reachable when neither side of the exchange resolves a project
+at all, which real hook/MCP traffic never hits (both `PreCompact`/`SessionStart` hook stdin
+and the MCP `handoff` tool's `cwd: process.cwd()` always supply one). `hookSessionStart` and
+the `savedRecently` check in `hookPostToolUse` now pass the hook payload's `cwd` through
+(`src/hook.mjs`). The interactive `tokenroom handoff` CLI (`latestContinuity`, `bin/
+tokenroom.mjs`) got the same treatment for consistency: it now prefers docs tagged to the
+CLI's own project, falling back to the global most-recent only when nothing here matches —
+byte-identical to pre-ADR-28 behavior when called with no cwd.
+
+**Additive/backward-compatible, never-throw:** a doc written under project A is structurally
+unreachable from a session whose cwd is project B (proven by construction, not just by
+matching logic); same-project resume — same or different session id — is unchanged; a legacy
+pre-ADR-28 doc (no `project` field, bare filename) still resolves for its own tagged session
+id and is never cross-served to a different one; a missing doc is a clean no-op, exactly as
+before. **Enforced by:** `projectFor`/`projectKeyFor`/`compositeKey` and the rewritten
+`saveContinuity`/`takeContinuity`/`latestContinuity` in `src/continuity.mjs`; the `cwd`
+threading in `src/hook.mjs` (`hookSessionStart`, `hookPostToolUse`) and `bin/tokenroom.mjs`;
+3 new tests in `test/continuity.test.mjs` covering cross-project isolation (symmetric, both
+directions), exact-match + legacy-doc resolution, and the missing-doc no-op — full suite
+(131 tests) green.
