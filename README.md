@@ -238,6 +238,14 @@ its reset with nothing wasted and nothing dark. Cruise, don't crash — at both 
   unburdened; at/below it they surface and escalate (and a window projected to run dry *before*
   its reset always surfaces, healthy % or not). Non-budget output (clock, context, deferred
   work, pins, intent) is never gated. A bad value falls back to the default (ADR-26).
+- **Weekly-warning control:** `weekly_warning: on | off | auto` (default **on**) is a
+  separate switch just for the `7d: X% left — weekly pace is HOT …` line (the 5h line above
+  has its own `critical_pct` gate). `off` silences it permanently; `auto` (opt-in) shows it
+  normally but suppresses it while a `belay` autonomous loop is actively armed for the
+  session — the loop is already pacing its own weekly spend. Change it anytime
+  with the `tokenroom_weekly_warning` MCP tool (persists to `config.json`; ADR-27) — note that
+  a *newly added* MCP tool needs `/mcp reload` (or a fresh session) before it's callable, even
+  though the underlying hook behavior is live immediately on every hook call.
 - **Governor modes:** `mode: performance | ondemand | powersave` shifts *when* tokenroom
   speaks (bands, receipt floors, throttle) — never what it says. Applies without restart.
 - **Opt-in guards:** `compact_guard_min` blocks *auto*-compaction minutes before a reset

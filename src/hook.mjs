@@ -10,6 +10,7 @@ import { takeContinuity, renderContinuityInjection } from './continuity.mjs';
 import { sampleFlow, sessionFlowStats } from './flow.mjs';
 import { pairAdvice, staleEcho, profileForKey } from './accounts.mjs';
 import { activeIntent, isFocused } from './intent.mjs';
+import { loopActiveForSession, resolveSessionId } from './looprobe.mjs';
 
 const STALE_SEC = 30 * 60;
 
@@ -560,7 +561,15 @@ export async function hookUserPromptSubmit() {
   // 2026-06-22). Above that, a healthy 7d window is noise that invites premature
   // throttling — so we don't even tell the model. The human-facing HUD/watch is unaffected.
   const WEEKLY_DISCLOSE_PCT = 20;
-  if (showQuota && sd?.used_pct != null && 100 - sd.used_pct < WEEKLY_DISCLOSE_PCT) {
+  // Weekly-warning control (ADR-27): gates ONLY this line, independent of the ADR-26
+  // critical_pct gate on the 5h line above. 'on' (default) is a no-op here — the
+  // short-circuit && below means loopActiveForSession is never even called, so 'on'
+  // stays byte-identical to pre-ADR-27 behavior. 'off' always suppresses. 'auto' (opt-in)
+  // suppresses only while a belay loop is armed-and-active for THIS session; absent/
+  // corrupt belay data resolves to false (loopActiveForSession never throws), so 'auto'
+  // with no belay installed behaves exactly like 'on'.
+  const weeklySuppressed = cfg.weekly_warning === 'off' || (cfg.weekly_warning === 'auto' && loopActiveForSession(resolveSessionId(mySession)));
+  if (!weeklySuppressed && showQuota && sd?.used_pct != null && 100 - sd.used_pct < WEEKLY_DISCLOSE_PCT) {
     let wkSeg = `7d: ${Math.round(100 - sd.used_pct)}% left`;
     const wk = s.burn?.weekly;
     if (wk?.hot && wk.projected_exhaustion && sd.resets_at) {

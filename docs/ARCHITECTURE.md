@@ -43,8 +43,9 @@ network (ADR-1). Each invocation is a fresh short-lived node process.
 | `src/doctor.mjs` | install diagnosis | flags foreign hooks sharing events; exit 1 on problems |
 | `src/resume.mjs` | deferred-work plan lifecycle: queue + both windows + `armed` | expiry survives a weekly deferral (ADR-25); single file |
 | `src/intent.mjs` | session work-intent (focused run + task queue) | 5th MCP write surface; session-tag+guard like checkpoint; 12h TTL (ADR-25) |
+| `src/looprobe.mjs` | read-only probe of belay's `~/.belay/loops.json` (armed+not-paused for this session?) | never imports belay's code; never throws — absent/corrupt belay → false (ADR-27) |
 | `src/fit.mjs` | fit_check + estimate_remaining verdict logic | context = real tokens; window = labeled heuristic |
-| `src/mcp.mjs` | stdio MCP server (newline JSON-RPC) | read-only + one write surface (ADR-6); version from package.json (ADR-10) |
+| `src/mcp.mjs` | stdio MCP server (newline JSON-RPC) | read-only plus a small set of deliberate write surfaces, each its own ADR (ADR-6); version from package.json (ADR-10) |
 | `src/install.mjs` | settings.json merge, skill copy, MCP registration | idempotent; backup/restore; refuses npx cache; uninstall leaves no trace |
 | `src/schema.mjs` + `schema/*.json` | ResourceState v0 validation | hand validator mirrors the JSON Schema |
 | `skill/SKILL.md` | the behavioral policy installed into Claude Code | wording is eval-tested — change only with eval evidence (ADR-9) |
@@ -69,7 +70,8 @@ labels/identity: label → `{keys[], config_dir?, last_seen, last_windows_snapsh
 (must-survive facts, ADR-12) · `intent.json` (session work-intent + task queue, ADR-25) ·
 `events.jsonl` (compaction lifecycle + context anomalies + account switch/rollover +
 resume-continued, capped) · `config.json` (user config: `stamp_enabled`, `ceiling_pct`,
-`mode`, `compact_guard_min`, `launch_gate`) · `raw-sample.jsonl` (only with `tap --capture`).
+`mode`, `compact_guard_min`, `launch_gate`, `critical_pct`, `weekly_warning`) ·
+`raw-sample.jsonl` (only with `tap --capture`).
 
 ## Extension points
 

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readState } from './state.mjs';
-import { accountDir, activeAccountKeys } from './util.mjs';
+import { accountDir, activeAccountKeys, writeConfig } from './util.mjs';
 import { fitCheck, estimateRemaining } from './fit.mjs';
 import { planResume } from './resume.mjs';
 import { setIntent } from './intent.mjs';
@@ -72,6 +72,18 @@ const TOOLS = [
         queue: { type: 'array', items: { type: 'string' }, description: 'the task list to keep running across resets (optional; each a short imperative)' },
       },
       required: ['kind'],
+    },
+  },
+  {
+    name: 'tokenroom_weekly_warning',
+    description:
+      "Easy on/off/auto switch for the WEEKLY (7d) budget-warning line in your prompt stamp — the '7d: X% left — weekly pace is HOT…' line, shown once the weekly window drops under 20% left. Does NOT touch the separate 5h/quota line. mode='on' (the default) always shows it once it's actually low. mode='off' silences it permanently. mode='auto' is the opt-in middle ground: it shows normally, EXCEPT while a belay loop is actively armed for this session — then it stays quiet, since an active autonomous loop is already pacing its own weekly spend. Persists to ~/.tokenroom/config.json, so it survives restarts; call again anytime to change it.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mode: { type: 'string', enum: ['on', 'off', 'auto'], description: "on (default) = always show the weekly line once it's low; off = never show it; auto = show it unless a belay loop is armed for this session" },
+      },
+      required: ['mode'],
     },
   },
   {
@@ -229,6 +241,22 @@ export function mcpServe() {
             ? `Focused run (${it.kind}): tokenroom keeps you at full speed to the 1% floor (no early-defer throttling), warns-and-arms before a big launch would die thin, and at the floor arms your queue to auto-resume IN THIS SESSION after the reset. Pass a queue here or via plan_resume(arm:true).`
             : 'Intent cleared to default — normal cautious descent restored.',
         };
+      } else if (name === 'tokenroom_weekly_warning') {
+        // works without state — persisting a config toggle must never depend on the tap being live
+        // (ADR-27's new write surface: config.json's `weekly_warning` key)
+        const mode = args?.mode;
+        if (!['on', 'off', 'auto'].includes(mode)) {
+          result = { set: false, error: "mode must be one of 'on' | 'off' | 'auto'" };
+        } else {
+          const cfg = writeConfig({ weekly_warning: mode });
+          const summary =
+            cfg.weekly_warning === 'off'
+              ? 'weekly (7d) warning line: OFF — it will never show, regardless of pace.'
+              : cfg.weekly_warning === 'auto'
+                ? 'weekly (7d) warning line: AUTO — shown normally (once <20% of the week is left), but suppressed while a belay loop is armed for this session.'
+                : 'weekly (7d) warning line: ON — shown whenever the weekly window drops below 20% left (the default).';
+          result = { set: true, mode: cfg.weekly_warning, summary };
+        }
       } else if (!state) {
         result = { error: 'no ResourceState collected yet — install the statusline tap (tokenroom install) and use Claude Code once' };
       } else if (name === 'resource_state') {
@@ -250,6 +278,7 @@ export function mcpServe() {
           (result?.recorded != null ? 'recorded' : null) ??
           (result?.pinned != null ? 'pinned' : null) ??
           (result?.saved != null ? 'saved' : null) ??
+          (name === 'tokenroom_weekly_warning' && result?.mode != null ? `weekly_warning:${result.mode}` : null) ??
           (result?.set != null ? `intent:${result.kind}` : null),
       });
       send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result, null, 1) }] } });

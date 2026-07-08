@@ -228,6 +228,12 @@ export function readConfig() {
     // (per-turn stamp, cost receipts, shared-session note) — it stays unburdened. AT/BELOW
     // it they surface and escalate. Default 25.
     critical_pct: 25,
+    // Weekly-warning control (ADR-27): gates ONLY the 7d/weekly line in the UserPromptSubmit
+    // stamp (the `critical_pct` gate above is the separate 5h/quota line). Default 'on' —
+    // matches today's behavior (shown once <20% of the week remains). 'off' silences it
+    // entirely; 'auto' (opt-in) additionally suppresses it while a belay loop is armed for
+    // this session, on the theory that an active autonomous loop is already pacing itself.
+    weekly_warning: 'on',
     ...(readJSON(join(tokenroomDir(), 'config.json')) ?? {}),
   };
   // Defensive (never-throw discipline, ADR-5): a hand-edited critical_pct that isn't a real
@@ -235,5 +241,23 @@ export function readConfig() {
   // than silencing the genuinely-critical case or spamming a healthy window.
   const cp = cfg.critical_pct;
   cfg.critical_pct = typeof cp === 'number' && Number.isFinite(cp) && cp >= 0 && cp <= 100 ? cp : 25;
+  // Same discipline for weekly_warning: anything other than the three valid modes
+  // (missing, hand-typo'd, wrong type) falls back to 'on' — the safer default is to WARN,
+  // never to silently swallow a genuinely binding weekly constraint.
+  cfg.weekly_warning = ['on', 'off', 'auto'].includes(cfg.weekly_warning) ? cfg.weekly_warning : 'on';
   return cfg;
+}
+
+/** Persist a partial config patch to ~/.tokenroom/config.json, merged with whatever is
+ *  already on disk (NOT the in-memory defaults) — so hand-edited/unrelated keys survive
+ *  untouched and the file only ever grows the keys something actually set. Returns the
+ *  fresh sanitized config (via readConfig) so the caller reports back the real effective
+ *  state, not just the raw patch. This is a deliberate, narrow write surface — see ADR-6/27. */
+export function writeConfig(patch) {
+  const dir = tokenroomDir();
+  ensureDir(dir);
+  const path = join(dir, 'config.json');
+  const onDisk = readJSON(path) ?? {};
+  atomicWriteJSON(path, { ...onDisk, ...patch });
+  return readConfig();
 }

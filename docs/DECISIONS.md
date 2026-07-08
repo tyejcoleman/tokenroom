@@ -449,3 +449,52 @@ gate on the normal quota line, pair advice, and shared-session note in `hookUser
 and on the receipt in `hookPostToolUse` (`src/hook.mjs`); the above/below/override/defensive
 matrix in `test/critical.test.mjs` (7 tests). WORDING is unchanged from the ADR-9-eval'd
 lines — this ADR only changes *whether* they fire, not what they say.
+
+## ADR-27 — Weekly-warning control: `weekly_warning` on/off/auto, opt-in loop-aware suppression (amends ADR-6)
+
+The weekly (7d) line — `7d: X% left — weekly pace is HOT …`, already gated to <20%-left by
+the 2026-06-22 user directive (untouched by this ADR) — had no way to turn off. A user
+running an autonomous belay loop wants it silenced automatically while the loop is driving
+(the loop is already pacing itself); everyone else wants it on, as today. **Decision:** a new
+`weekly_warning` config (`'on'` default | `'off'` | `'auto'`) gates *only* this line, entirely
+independent of `critical_pct` (ADR-26), which gates the separate 5h line. `'on'` is a no-op —
+byte-identical to pre-ADR-27 output, including that the loop-probe below is never even called
+(short-circuited), so there is zero behavior or I/O change for the default/unconfigured case.
+`'off'` always suppresses the weekly line. `'auto'` (opt-in) additionally suppresses it exactly
+while a belay loop is armed-and-not-paused for *this* session — otherwise it behaves like
+`'on'`. A bad/missing value (wrong type, typo, out of the three modes) falls back to `'on'`,
+the same "the safer default is to warn" defensive posture as `critical_pct` (ADR-5/26).
+
+**Loop detection** (`src/looprobe.mjs`, new file) reads `~/.belay/loops.json` — read-only,
+zero import of belay's package or code, mirroring belay's own `BELAY_DIR`-env-override /
+`~/.belay`-fallback dir resolution. It returns true only for an entry whose `session_id`
+matches the current session (from the hook stdin's `session_id`, falling back to
+`$CLAUDE_CODE_SESSION_ID`) with `armed` truthy and `paused` falsy. Absent belay, a missing or
+corrupt `loops.json`, or any unexpected shape (array where an object is expected, a string
+entry, etc.) all resolve to `false` — never throws, never blocks the hook (ADR-5 discipline);
+`'auto'` then behaves exactly like `'on'`. Global-scope loop entries (`session_id: null`) never
+match a real session id, so they cannot accidentally suppress an unrelated session's warning.
+
+**New write surface** (amends ADR-6, which is otherwise stale — several write surfaces already
+exist by ADR-25/T2.x; this entry is the record for *this* one): the `tokenroom_weekly_warning`
+MCP tool (`{ mode: 'on'|'off'|'auto' }`) persists to `~/.tokenroom/config.json` via a new
+`writeConfig()` helper in `src/util.mjs` that merges the patch onto whatever is already on
+disk (not the in-memory defaults), so unrelated hand-edited keys are never clobbered. It
+returns the resolved mode plus a one-line human summary. **Caveat:** hook behavior (the
+gate above) is live immediately — `settings.json` hooks spawn a fresh `bin/tokenroom.mjs`
+process per event, so an edited config or a changed belay loop state takes effect on the very
+next hook call. The MCP *tool*, by contrast, runs inside a long-lived MCP server process
+already loaded into the current Claude Code session; a NEWLY ADDED tool is not callable until
+that server connection is refreshed — run `/mcp reload` (or start a fresh session) before
+invoking `tokenroom_weekly_warning` for the first time after upgrading.
+
+*Why opt-in, not automatic:* the user was explicit — "usually it should be ON" — so any
+loop-awareness must be something the user turns on (`auto`), never a silent default behavior
+change; `'on'` stays the shipped default and is provably byte-identical to today's output.
+**Enforced by:** `weekly_warning` default + sanitization in `readConfig`, `writeConfig` in
+`src/util.mjs`; the `weeklySuppressed` gate in `hookUserPromptSubmit` (`src/hook.mjs`);
+`loopActiveForSession`/`resolveSessionId`/`belayDir` in `src/looprobe.mjs`; the
+`tokenroom_weekly_warning` tool + dispatch in `src/mcp.mjs`; `test/looprobe.test.mjs` (13
+tests: armed/paused/session-mismatch/global-scope/missing-belay/corrupt-JSON/malformed-shape
+matrix) and `test/weekly-warning.test.mjs` (12 tests: default/sanitize/on-byte-identical/
+off/auto×{active,none,paused,other-session,garbled,absent}/5h-line-untouched/MCP round-trip).
