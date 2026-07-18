@@ -248,6 +248,18 @@ export function readConfig() {
     // Minimum UserPromptSubmit turns between nudge firings for one session — keeps it
     // non-spammy on a long run that stays above the threshold.
     facilitator_nudge_cooldown_turns: 10,
+    // Premium-model weekly cap (user directive 2026-07-17): Fable-class usage exhausts at
+    // a FRACTION of the weekly window — Anthropic enforces a separate, smaller premium
+    // budget the statusline payload does not (yet) expose as its own window. Modeled as a
+    // derived ceiling over seven_day.used_pct, active only when the session's model id
+    // matches premium_model_regex. If a real per-tier window ever appears in rate_limits,
+    // the generic parser captures it and that ground truth should supersede this estimate.
+    premium_cap_pct: 50,
+    premium_model_regex: 'fable',
+    // Points-of-weekly-budget remaining under the cap at/below which the stamp starts
+    // disclosing (quiet-until-it-matters, ADR-26 spirit). Once the cap is exceeded the
+    // line always shows.
+    premium_disclose_pts: 20,
     ...(readJSON(join(tokenroomDir(), 'config.json')) ?? {}),
   };
   // Defensive (never-throw discipline, ADR-5): a hand-edited critical_pct that isn't a real
@@ -259,6 +271,17 @@ export function readConfig() {
   // (missing, hand-typo'd, wrong type) falls back to 'on' — the safer default is to WARN,
   // never to silently swallow a genuinely binding weekly constraint.
   cfg.weekly_warning = ['on', 'off', 'auto'].includes(cfg.weekly_warning) ? cfg.weekly_warning : 'on';
+  // Premium-cap fields: same defensive discipline — invalid values fall back to defaults
+  // (cap must be a real 1–100 number; regex must compile; disclose_pts a real 0–100 number).
+  const pc = cfg.premium_cap_pct;
+  cfg.premium_cap_pct = typeof pc === 'number' && Number.isFinite(pc) && pc > 0 && pc <= 100 ? pc : 50;
+  try {
+    new RegExp(cfg.premium_model_regex, 'i');
+  } catch {
+    cfg.premium_model_regex = 'fable';
+  }
+  const pd = cfg.premium_disclose_pts;
+  cfg.premium_disclose_pts = typeof pd === 'number' && Number.isFinite(pd) && pd >= 0 && pd <= 100 ? pd : 20;
   // Same defensive discipline for the facilitator signal: a hand-edited bad value never
   // crashes and never silently produces nonsense (e.g. a negative or non-numeric
   // threshold that would fire on every turn, or a cooldown of 0 that defeats rate-limiting).

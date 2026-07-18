@@ -584,6 +584,23 @@ export async function hookUserPromptSubmit() {
     }
     parts.push(wkSeg);
   }
+  // Premium/Fable weekly cap (user directive 2026-07-17): Fable-class sessions exhaust at
+  // premium_cap_pct of the weekly window, not 100%. Derived from seven_day.used_pct because
+  // the payload exposes no per-tier window (the generic parser will pick one up if it ever
+  // appears — prefer that ground truth over this estimate). Own disclosure gate: quiet
+  // until within premium_disclose_pts of the cap; always shown once exceeded. Rides
+  // weeklySuppressed so 'off'/'auto' silence budget coaching consistently.
+  const premiumRe = new RegExp(cfg.premium_model_regex, 'i');
+  if (!weeklySuppressed && sd?.used_pct != null && s.model && premiumRe.test(s.model)) {
+    const capLeftPts = Math.round((cfg.premium_cap_pct - sd.used_pct) * 10) / 10;
+    if (capLeftPts <= cfg.premium_disclose_pts) {
+      parts.push(
+        capLeftPts > 0
+          ? `fable weekly cap — this model tier exhausts at ~${cfg.premium_cap_pct}% of the weekly window: ${capLeftPts} pts left under the cap (weekly at ${Math.round(sd.used_pct)}%). Budget Fable-heavy work against the CAP, not the full week; prefer Opus-tier agents for mechanical work as the cap nears`
+          : `fable weekly cap EXCEEDED — weekly at ${Math.round(sd.used_pct)}% ≥ the ~${cfg.premium_cap_pct}% premium ceiling: expect Fable-tier throttling/denial until the weekly reset${sd.resets_at ? ` (${fmtClock(sd.resets_at)})` : ''}; route remaining work to non-premium tiers`
+      );
+    }
+  }
   // the 5h window is ACCOUNT-level: other open sessions burn it too. Sessions whose
   // hooks touched bands.json recently are live burners — disclose them (field 2026-06-10:
   // a 29-point single-call "receipt" was a concurrent session's burn, co-attributed).

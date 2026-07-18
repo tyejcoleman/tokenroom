@@ -7,13 +7,19 @@ export function parsePayload(payload, nowMs = Date.now()) {
   const cfg = readConfig();
   const ceiling = Number(process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) || cfg.ceiling_pct;
 
+  // Parse ALL rate_limit windows generically (2026-07-17): the payload ships five_hour +
+  // seven_day today, but per-model-tier windows (e.g. a premium/Fable weekly) would arrive
+  // as sibling keys — capture them the day they appear instead of silently dropping them.
   const windows = {};
-  for (const key of ['five_hour', 'seven_day']) {
-    const w = payload?.rate_limits?.[key];
-    if (w && typeof w === 'object') {
-      const used = clampPct(w.used_percentage);
-      const resets = epochSec(w.resets_at);
-      if (used !== null || resets !== null) windows[key] = { used_pct: used, resets_at: resets };
+  const rl = payload?.rate_limits;
+  if (rl && typeof rl === 'object') {
+    for (const key of Object.keys(rl)) {
+      const w = rl[key];
+      if (w && typeof w === 'object') {
+        const used = clampPct(w.used_percentage);
+        const resets = epochSec(w.resets_at);
+        if (used !== null || resets !== null) windows[key] = { used_pct: used, resets_at: resets };
+      }
     }
   }
 
@@ -36,6 +42,9 @@ export function parsePayload(payload, nowMs = Date.now()) {
     provider: 'anthropic',
     auth: windows.five_hour || windows.seven_day ? 'subscription' : 'unknown',
     session_id: typeof payload?.session_id === 'string' ? payload.session_id : null,
+    // Session's model id (2026-07-17): lets the hook apply model-tier budget rules
+    // (the premium/Fable weekly cap) only to sessions actually running that tier.
+    model: typeof payload?.model?.id === 'string' ? payload.model.id : null,
     windows,
     context,
     burn: { pct_per_hour: null, projected_exhaustion: null },
